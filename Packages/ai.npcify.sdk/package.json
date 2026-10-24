@@ -1,0 +1,26 @@
+{
+  "name": "ai.npcify.sdk",
+  "displayName": "Npcify Unity SDK",
+  "version": "0.2.0",
+  "unity": "2021.3",
+  "description": "Npcify AI character SDK for Unity with NPCP performance streaming, baked offline conversations, VRM/blendshape facial expressions, viseme lip-sync, skeletal animation, and 3D spatial audio.",
+  "keywords": [
+    "npc",
+    "ai",
+    "vrm",
+    "lipsync",
+    "character",
+    "sdk"
+  ],
+  "author": {
+    "name": "Npcify",
+    "url": "https://npcify.ai"
+  },
+  "samples": [
+    {
+      "displayName": "3D Game Character Integration",
+      "description": "Import an AI character into a Unity 3D scene with real-time mesh, bone, blendshape, audio, and conversation access.",
+      "path": "Samples~/ThreeDGame"
+    }
+  ]
+}

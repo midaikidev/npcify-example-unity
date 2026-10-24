@@ -1,0 +1,11 @@
+{
+    "characterId": "221608de-65d0-49f0-97b4-800ce08c198d",
+    "name": "ひなた(offline)",
+    "idleAnimationId": "idle",
+    "bakedConversationRevision": 11,
+    "animations": [
+        "idle",
+        "japanese_bow",
+        "show_full_body"
+    ]
+}

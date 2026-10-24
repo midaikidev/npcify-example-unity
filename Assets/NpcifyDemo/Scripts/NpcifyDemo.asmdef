@@ -1,0 +1,25 @@
+{
+    "name": "NpcifyDemo",
+    "rootNamespace": "NpcifyDemo",
+    "references": [
+        "Npcify.Sdk.Runtime",
+        "StarterAssets",
+        "VRM10",
+        "UniGLTF",
+        "UniGLTF.Utils",
+        "UniHumanoid",
+        "Unity.Timeline",
+        "Unity.Cinemachine",
+        "Unity.InputSystem",
+        "UnityEngine.UI"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}
