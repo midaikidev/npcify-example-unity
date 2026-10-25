@@ -30,6 +30,9 @@ namespace NpcifyDemo
     /// </summary>
     public sealed class NpcifyNpc : MonoBehaviour
     {
+        /// <summary>The layer of the VRM model. The ink outline draws only silhouette lines on it.</summary>
+        public const string CharacterLayerName = "NpcifyCharacter";
+
         [SerializeField] private NpcConnectionMode mode = NpcConnectionMode.OfflineBaked;
         [Tooltip("Folder under StreamingAssets/Npcify for the offline character.")]
         [SerializeField] private string offlineFolder = "hinata";
@@ -225,6 +228,14 @@ namespace NpcifyDemo
             foreach (var skinned in _vrm.GetComponentsInChildren<SkinnedMeshRenderer>())
             {
                 skinned.updateWhenOffscreen = true;
+            }
+            var characterLayer = LayerMask.NameToLayer(CharacterLayerName);
+            if (characterLayer >= 0)
+            {
+                foreach (var child in _vrm.GetComponentsInChildren<Transform>(true))
+                {
+                    child.gameObject.layer = characterLayer;
+                }
             }
 
             AttachCharacterToModel(options, _vrm.transform);

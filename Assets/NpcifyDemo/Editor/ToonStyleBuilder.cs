@@ -21,7 +21,13 @@ namespace NpcifyDemo.Editor
         private const string LitVariantsFolder = RenderingFolder + "/Resources/LitVariants";
         private const string InkMaterialPath = RenderingFolder + "/InkOutline.mat";
         private const string VolumeProfilePath = RenderingFolder + "/ToonVolume.asset";
+        private const string StencilMaterialPath = RenderingFolder + "/CharacterStencil.mat";
         private const string InkFeatureName = "Npcify Ink Outline";
+        private const string CharacterInkFeatureName = "Npcify Ink Outline (characters)";
+        private const string CharacterStencilFeatureName = "Npcify Character Stencil";
+
+        /// <summary>The layer of the VRM characters (<see cref="NpcifyNpc.CharacterLayerName"/>).</summary>
+        public const int CharacterLayer = 8;
         private const string MToonOutlineFeatureName = "MToon Outline";
 
         private static readonly string[] RendererPaths =
@@ -91,6 +97,14 @@ namespace NpcifyDemo.Editor
             inkMaterial.CopyPropertiesFromMaterial(new Material(inkMaterial.shader));
             EditorUtility.SetDirty(inkMaterial);
 
+            var stencilMaterial = AssetDatabase.LoadAssetAtPath<Material>(StencilMaterialPath);
+            if (stencilMaterial == null)
+            {
+                stencilMaterial = new Material(Shader.Find("NpcifyDemo/Character Stencil"));
+                AssetDatabase.CreateAsset(stencilMaterial, StencilMaterialPath);
+            }
+            NameCharacterLayer();
+
             foreach (var path in RendererPaths)
             {
                 var data = AssetDatabase.LoadAssetAtPath<UniversalRendererData>(path);
@@ -107,22 +121,21 @@ namespace NpcifyDemo.Editor
                     }
                 }
 
-                if (!HasFeature(data, InkFeatureName))
-                {
-                    var ink = ScriptableObject.CreateInstance<FullScreenPassRendererFeature>();
-                    ink.name = InkFeatureName;
-                    ink.injectionPoint = FullScreenPassRendererFeature.InjectionPoint.BeforeRenderingPostProcessing;
-                    ink.requirements = ScriptableRenderPassInput.Depth | ScriptableRenderPassInput.Normal;
-                    ink.fetchColorBuffer = true;
-                    ink.passMaterial = inkMaterial;
-                    AddFeature(data, ink);
-                }
-                if (!HasFeature(data, MToonOutlineFeatureName))
-                {
-                    var outline = ScriptableObject.CreateInstance<MToonOutlineRenderFeature>();
-                    outline.name = MToonOutlineFeatureName;
-                    AddFeature(data, outline);
-                }
+                // 1. Characters write stencil 1, so that the ink passes can tell them apart.
+                var stencil = GetOrAddFeature<RenderObjects>(data, CharacterStencilFeatureName);
+                stencil.settings.Event = RenderPassEvent.AfterRenderingOpaques;
+                stencil.settings.filterSettings.RenderQueueType = RenderQueueType.Opaque;
+                stencil.settings.filterSettings.LayerMask = 1 << CharacterLayer;
+                stencil.settings.overrideMode = RenderObjects.RenderObjectsSettings.OverrideMaterialMode.Material;
+                stencil.settings.overrideMaterial = stencilMaterial;
+                stencil.settings.overrideMaterialPassIndex = 0;
+
+                // 2. Ink lines: depth and normal edges on the level, depth edges only on the
+                //    characters (normal edges draw a line on every hair strand and face shape).
+                ConfigureInk(GetOrAddFeature<FullScreenPassRendererFeature>(data, InkFeatureName), inkMaterial, 0);
+                ConfigureInk(GetOrAddFeature<FullScreenPassRendererFeature>(data, CharacterInkFeatureName), inkMaterial, 1);
+
+                GetOrAddFeature<MToonOutlineRenderFeature>(data, MToonOutlineFeatureName);
                 EditorUtility.SetDirty(data);
             }
             AssetDatabase.SaveAssets();
@@ -195,16 +208,38 @@ namespace NpcifyDemo.Editor
             return profile;
         }
 
-        private static bool HasFeature(ScriptableRendererData data, string name)
+        private static T GetOrAddFeature<T>(ScriptableRendererData data, string name) where T : ScriptableRendererFeature
         {
             foreach (var feature in data.rendererFeatures)
             {
-                if (feature != null && feature.name == name)
+                if (feature is T typed && feature.name == name)
                 {
-                    return true;
+                    return typed;
                 }
             }
-            return false;
+            var created = ScriptableObject.CreateInstance<T>();
+            created.name = name;
+            AddFeature(data, created);
+            return created;
+        }
+
+        private static void ConfigureInk(FullScreenPassRendererFeature ink, Material material, int passIndex)
+        {
+            ink.injectionPoint = FullScreenPassRendererFeature.InjectionPoint.BeforeRenderingPostProcessing;
+            ink.requirements = ScriptableRenderPassInput.Depth | ScriptableRenderPassInput.Normal;
+            ink.fetchColorBuffer = true;
+            // The passes test the character stencil.
+            ink.bindDepthStencilAttachment = true;
+            ink.passMaterial = material;
+            ink.passIndex = passIndex;
+        }
+
+        private static void NameCharacterLayer()
+        {
+            var tagManager = new SerializedObject(AssetDatabase.LoadAllAssetsAtPath("ProjectSettings/TagManager.asset")[0]);
+            var layers = tagManager.FindProperty("layers");
+            layers.GetArrayElementAtIndex(CharacterLayer).stringValue = NpcifyNpc.CharacterLayerName;
+            tagManager.ApplyModifiedPropertiesWithoutUndo();
         }
 
         private static void AddFeature(ScriptableRendererData data, ScriptableRendererFeature feature)

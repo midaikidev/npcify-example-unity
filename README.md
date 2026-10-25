@@ -86,8 +86,11 @@ The level is drawn in a cel-shaded anime style:
 - **Ink lines.** A URP *Full Screen Pass* renderer feature runs
   `NpcifyDemo/Ink Outline` (`NpcifyInkOutline.shader`). Depth and normal edges
   darken the color below them, so the lines have the color of the surface. They
-  fade out with distance. The *MToon Outline* feature draws the outlines that a
-  VRM material sets.
+  fade out with distance. On the VRM characters only depth edges make lines (the
+  silhouette and overlaps), so hair strands and faces stay clean: the characters are
+  on the `NpcifyCharacter` layer, and the *Npcify Character Stencil* feature marks
+  them with stencil 1 for the second ink pass. The *MToon Outline* feature draws the
+  outlines that a VRM material sets.
 - **Color.** A global volume (`Assets/NpcifyDemo/Rendering/ToonVolume.asset`)
   adds saturation and a soft bloom. Ambient occlusion is off.
 
