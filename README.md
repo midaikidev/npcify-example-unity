@@ -73,7 +73,7 @@ typewriter text) and writes the face blend shapes of the VRM model.
   the API, then `CreateConversationAsync()` and `ReplyAsync()` request each
   reply from the API.
 
-The Npcify Unity SDK is in `Packages/ai.npcify.sdk` (version 0.2.0).
+The Npcify Unity SDK is in `Packages/ai.npcify.sdk` (version 0.2.1).
 
 ### Anime look
 

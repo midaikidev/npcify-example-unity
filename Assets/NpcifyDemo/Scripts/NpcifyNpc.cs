@@ -258,11 +258,8 @@ namespace NpcifyDemo
         {
             var character = modelRoot.gameObject.AddComponent<NpcifyCharacter>();
             character.Configure(options);
+            // The SDK adds a 3D voice AudioSource: full volume within 2.5 m, silent at 30 m.
             character.RefreshAvatarBindings();
-            var audioSource = character.AudioSource;
-            audioSource.minDistance = 2.5f;
-            audioSource.maxDistance = 30f;
-            audioSource.rolloffMode = AudioRolloffMode.Linear;
             _character = character;
         }
 

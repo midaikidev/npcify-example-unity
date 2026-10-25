@@ -59,6 +59,7 @@ namespace NpcifyDemo
                 _controller.TryOpenNearby();
                 yield return new WaitForSeconds(2.2f);
                 yield return Capture($"{step++:00}-{tag}-speaking");
+                LogVoiceSource(tag, npc);
                 yield return WaitFor(() => _controller.IsChoosing, 90f, $"{tag} opening");
                 yield return Capture($"{step++:00}-{tag}-choices");
                 Log($"{tag} choices: {string.Join(" | ", _controller.ChoiceLabels)} (max mouth openness {_maxMouthOpenness:F2})");
@@ -66,6 +67,12 @@ namespace NpcifyDemo
 
                 _controller.Choose(0);
                 yield return new WaitForSeconds(0.5f);
+                if (npc.Mode == NpcConnectionMode.OfflineBaked)
+                {
+                    // Panning check (offline NPC: its reply starts at once): a listener with the NPC
+                    // on its right must hear the voice louder in the right channel.
+                    yield return MeasurePanning(tag, npc);
+                }
                 yield return WaitFor(() => _controller.IsChoosing, 90f, $"{tag} reply");
                 yield return Capture($"{step++:00}-{tag}-reply");
                 Log($"{tag} reply choices: {string.Join(" | ", _controller.ChoiceLabels)}");
@@ -134,6 +141,55 @@ namespace NpcifyDemo
             ScreenCapture.CaptureScreenshot(path);
             Log($"Screenshot {path}");
             yield return null;
+        }
+
+        private static void LogVoiceSource(string tag, NpcifyNpc npc)
+        {
+            var source = npc.Character != null ? npc.Character.AudioSource : null;
+            var listener = FindAnyObjectByType<AudioListener>();
+            if (source == null || listener == null)
+            {
+                Log($"{tag} voice source: missing");
+                return;
+            }
+            var distance = Vector3.Distance(source.transform.position, listener.transform.position);
+            Log($"{tag} voice spatialBlend={source.spatialBlend:F1} rolloff={source.rolloffMode} " +
+                $"min={source.minDistance:F1} max={source.maxDistance:F1} distance={distance:F1}");
+        }
+
+        private static IEnumerator MeasurePanning(string tag, NpcifyNpc npc)
+        {
+            var cameraListener = FindAnyObjectByType<AudioListener>();
+            var head = npc.transform.position + Vector3.up * 1.5f;
+            // 2 m in front of the NPC, turned so that the NPC is on the listener's right.
+            var toNpc = -npc.transform.forward;
+            var probe = new GameObject("Autotest Listener");
+            probe.transform.SetPositionAndRotation(head - toNpc * 2f,
+                Quaternion.LookRotation(Vector3.Cross(toNpc, Vector3.up), Vector3.up));
+            if (cameraListener != null)
+            {
+                cameraListener.enabled = false;
+            }
+            probe.AddComponent<AudioListener>();
+            const int frames = 45;
+            var samples = new float[1024];
+            double left = 0;
+            double right = 0;
+            for (var frame = 0; frame < frames; frame++)
+            {
+                yield return null;
+                AudioListener.GetOutputData(samples, 0);
+                left += samples.Sum(v => (double)v * v);
+                AudioListener.GetOutputData(samples, 1);
+                right += samples.Sum(v => (double)v * v);
+            }
+            Destroy(probe);
+            if (cameraListener != null)
+            {
+                cameraListener.enabled = true;
+            }
+            string Db(double energy) => (10 * Math.Log10(energy / (frames * samples.Length) + 1e-24)).ToString("F1");
+            Log($"{tag} voice with the NPC on the right: left {Db(left)} dBFS, right {Db(right)} dBFS");
         }
 
         private static void Log(string message)

@@ -26,7 +26,12 @@ namespace Npcify.Sdk.Unity
         [SerializeField] private Animator animatorComponent;
         [SerializeField] private AudioSource audioSourceComponent;
         [SerializeField] private Transform gazeTarget;
+        [Tooltip("The voice comes from the character: left/right panning and distance falloff. Off: a 2D voice.")]
         [SerializeField] private bool spatialAudio = true;
+        [Tooltip("Full voice volume within this distance, in meters. Used for an AudioSource that the SDK adds.")]
+        [SerializeField, Min(0f)] private float voiceMinDistance = 2.5f;
+        [Tooltip("The voice fades linearly to silence at this distance, in meters. Used for an AudioSource that the SDK adds.")]
+        [SerializeField, Min(0.01f)] private float voiceMaxDistance = 30f;
         [SerializeField] private bool autoBlink = true;
 
         [Header("Offline Baked Conversation (Optional)")]
@@ -146,6 +151,10 @@ namespace Npcify.Sdk.Unity
                 if (audioSourceComponent == null)
                 {
                     audioSourceComponent = gameObject.AddComponent<AudioSource>();
+                    // An AudioSource of the game keeps its own distances and rolloff.
+                    audioSourceComponent.rolloffMode = AudioRolloffMode.Linear;
+                    audioSourceComponent.minDistance = voiceMinDistance;
+                    audioSourceComponent.maxDistance = Mathf.Max(voiceMaxDistance, voiceMinDistance + 0.01f);
                 }
             }
 

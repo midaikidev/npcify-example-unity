@@ -1,7 +1,7 @@
 {
   "name": "ai.npcify.sdk",
   "displayName": "Npcify Unity SDK",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "unity": "2021.3",
   "description": "Npcify AI character SDK for Unity with NPCP performance streaming, baked offline conversations, VRM/blendshape facial expressions, viseme lip-sync, skeletal animation, and 3D spatial audio.",
   "keywords": [

@@ -10,7 +10,7 @@ Unity Package Manager (UPM) client for embedding Npcify AI characters into Unity
 - **Layered Facial Expression & Viseme Mixer (`NpcifyFacialMixer`, `NpcifyVisemePlayer`)**: Multi-layer blending (`Emotion`, `Viseme`, `Blink`, `Gaze`), exponential smoothing, automatic natural blinking, coarticulated viseme scheduling, and automatic alias resolution across VRM 1.0 (`aa`, `ih`, `ou`, `ee`, `oh`, `happy`), VRM 0.x (`A`, `I`, `U`, `E`, `O`, `Joy`), and ARKit/Fcl blendshapes.
 - **Unity `MonoBehaviour` Integration (`NpcifyCharacter`)**:
   - Real-time access to `Root`, `Animator`, `SkinnedMeshRenderers`, `Meshes`, `Materials`, and humanoid bones via `GetBone(HumanBodyBones)`.
-  - Spatial 3D `AudioSource` playback with automatic WAV/PCM16/Float32 `AudioClip` construction and live RMS amplitude analysis.
+  - Spatial 3D `AudioSource` playback with automatic WAV/PCM16/Float32 `AudioClip` construction and live RMS amplitude analysis. See [Spatial voice](#spatial-voice).
   - Real-time `Speech` state (`Speaking`, `Thinking`, `CurrentSpeech`, `CurrentText`, `RevealedText`, `Options`, `Cursor`) and `Expressions.MouthOpenness`.
   - Custom Unity Editor Inspector (`NpcifyCharacterEditor`) to import `npcify-unity-sdk.json` exported from the Npcify dashboard and auto-bind avatar rigs.
 
@@ -30,14 +30,14 @@ Add the Npcify scoped registry and `ai.npcify.sdk` to `Packages/manifest.json`:
     }
   ],
   "dependencies": {
-    "ai.npcify.sdk": "0.2.0"
+    "ai.npcify.sdk": "0.2.1"
   }
 }
 ```
 
 ### Option 2: Download `.tgz` Tarball
 
-Download the latest UPM package tarball from `https://npcify.ai/sdk/unity/latest` (or a specific version from `https://npcify.ai/sdk/unity/app/0.2.0`), then in Unity open **Window > Package Manager > + > Install package from tarball...** and select the downloaded `ai.npcify.sdk-0.2.0.tgz` file.
+Download the latest UPM package tarball from `https://npcify.ai/sdk/unity/latest` (or a specific version from `https://npcify.ai/sdk/unity/app/0.2.1`), then in Unity open **Window > Package Manager > + > Install package from tarball...** and select the downloaded `ai.npcify.sdk-0.2.1.tgz` file.
 
 ## Quick Start (3D Game Integration)
 
@@ -104,6 +104,19 @@ public sealed class NpcifyGameExample : MonoBehaviour
   staging. Play them with your own animation system (for example UniVRM
   `Vrm10AnimationInstance` for the character's VRMA files). An `Animator` with a
   controller that has a state of that name also plays it.
+
+## Spatial Voice
+
+The voice is 3D by default (`spatialAudio`): it comes from the character, with
+left/right panning and distance falloff. An `AudioSource` that the SDK adds has
+linear rolloff, full volume within `voiceMinDistance` (2.5 m) and silence at
+`voiceMaxDistance` (30 m). Put your own `AudioSource` on the character to use
+other settings; the SDK keeps its distances and rolloff. Turn `spatialAudio` off
+for a 2D voice, for example in a menu or a phone call.
+
+Unity hears from the `AudioListener`, usually on the main camera. In a
+third-person game with a far camera, you can move the listener to the player
+character, so that the distance to the NPC sets the volume.
 
 ## Example Project
 
