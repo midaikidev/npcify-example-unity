@@ -59,6 +59,7 @@ The `.env` file is in `.gitignore`. Do not commit your key.
 | Interaction prompt, conversation flow and input | `Assets/NpcifyDemo/Scripts/NpcDialogueController.cs` |
 | RPG dialogue UI (built in code) | `Assets/NpcifyDemo/Scripts/DialogueView.cs` |
 | Over-the-shoulder conversation camera | `Assets/NpcifyDemo/Scripts/DialogueCameraRig.cs` |
+| Anime look: toon shader, ink lines, renderer setup | `Assets/NpcifyDemo/Rendering/`, `Assets/NpcifyDemo/Editor/ToonStyleBuilder.cs` |
 
 `NpcifyCharacter` from the Npcify Unity SDK does the character work: it plays
 each staging (speech audio, lip-sync visemes, expressions, animation cues,
@@ -73,6 +74,26 @@ typewriter text) and writes the face blend shapes of the VRM model.
   reply from the API.
 
 The Npcify Unity SDK is in `Packages/ai.npcify.sdk` (version 0.2.0).
+
+### Anime look
+
+The level is drawn in a cel-shaded anime style:
+
+- **Cel shading.** The level and the player use `NpcifyDemo/Toon Lit`
+  (`Assets/NpcifyDemo/Rendering/NpcifyToonLit.shader`): two flat tones (lit and a
+  tinted shade), hard shadow shapes, and a thin rim light. The VRM characters keep
+  their own MToon materials.
+- **Ink lines.** A URP *Full Screen Pass* renderer feature runs
+  `NpcifyDemo/Ink Outline` (`NpcifyInkOutline.shader`). Depth and normal edges
+  darken the color below them, so the lines have the color of the surface. They
+  fade out with distance. The *MToon Outline* feature draws the outlines that a
+  VRM material sets.
+- **Color.** A global volume (`Assets/NpcifyDemo/Rendering/ToonVolume.asset`)
+  adds saturation and a soft bloom. Ambient occlusion is off.
+
+`ToonStyleBuilder` (in the **Npcify > Rebuild Demo Scene** step) makes the toon
+materials from the template materials and adds the renderer features. To change
+the look, edit the shader properties, then rebuild the scene.
 
 ## Use your own characters
 

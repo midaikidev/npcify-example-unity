@@ -57,6 +57,8 @@ namespace NpcifyDemo.Editor
             }
 
             var player = CreatePlayer();
+            ToonStyleBuilder.ConfigureRenderers();
+            ToonStyleBuilder.ApplyToScene();
             ConfigureShoulderCamera(player);
             ConfigureBrain();
             Physics.SyncTransforms();
