@@ -215,6 +215,10 @@ namespace NpcifyDemo
 
             // The SDK writes face blend shapes in LateUpdate. UniVRM must update first.
             _vrm.UpdateType = Vrm10Instance.UpdateTypes.Update;
+            // UniVRM makes the control rig on the first Runtime access and keeps the bone
+            // world rotations of that moment as the T-pose. Make it before the model gets
+            // the NPC's rotation, or every animation plays mirrored (raised arms).
+            _ = _vrm.Runtime;
             _vrm.transform.SetParent(transform, false);
             _vrm.transform.localPosition = Vector3.zero;
             _vrm.transform.localRotation = Quaternion.identity;
