@@ -124,6 +124,38 @@ namespace NpcifyDemo
             return await _character.ReplyAsync(message, cancellationToken);
         }
 
+        /// <summary>
+        /// The player showed that they will reply (they pressed the talk key or started to type):
+        /// warm up live motion. The SDK does it once per conversation and only for a character
+        /// with live motion on, so the first reply's motion does not wait for the GPU.
+        /// </summary>
+        public void PrepareLiveMotion()
+        {
+            if (IsReady && mode == NpcConnectionMode.OnlineApi && _character != null)
+            {
+                _ = PrepareLiveMotionAsync();
+            }
+        }
+
+        private async Task PrepareLiveMotionAsync()
+        {
+            try
+            {
+                if (await _character.PrepareLiveMotionAsync(_lifetime.Token))
+                {
+                    Debug.Log($"[Npcify demo] {DisplayName}: live motion warms up.");
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                // The scene was unloaded.
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[Npcify demo] {DisplayName}: live motion warm-up failed: {ex.Message}");
+            }
+        }
+
         public void EndConversation()
         {
             if (_character != null)
@@ -248,6 +280,7 @@ namespace NpcifyDemo
             _animations.Initialize(_vrm, manifest.IdleAnimationId, source.LoadAnimationAsync);
             _character.OnAnimationRequested += (animationId, loop) => _ = _animations.PlayAsync(animationId, loop);
             _character.OnError += ex => Debug.LogWarning($"[Npcify demo] {DisplayName}: {ex.Message}");
+            _character.Runtime.OnStreamLog += note => Debug.Log($"[Npcify demo] {DisplayName}: {note}");
             await _animations.PlayIdleAsync();
 
             State = NpcLoadState.Ready;

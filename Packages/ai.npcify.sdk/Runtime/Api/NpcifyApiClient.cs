@@ -9,6 +9,7 @@ using System.Threading.Tasks;
 using Npcify.Sdk.Conversation;
 using Npcify.Sdk.Models;
 using Npcify.Sdk.Protocol;
+using Npcify.Sdk.Speech;
 
 namespace Npcify.Sdk.Api
 {
@@ -162,13 +163,26 @@ namespace Npcify.Sdk.Api
             }
         }
 
-        public async Task<ConversationCreationResult> CreateConversationAsync(
+        public Task<ConversationCreationResult> CreateConversationAsync(
             string renderSessionId = null,
             CancellationToken cancellationToken = default
         )
         {
+            return CreateConversationAsync(renderSessionId, null, cancellationToken);
+        }
+
+        /// <summary>
+        /// Creates a conversation. <paramref name="capabilities"/> declares what this client plays,
+        /// for example <c>motion_frames</c> (live motion, docs/realtime-motion.md).
+        /// </summary>
+        public async Task<ConversationCreationResult> CreateConversationAsync(
+            string renderSessionId,
+            IReadOnlyList<string> capabilities,
+            CancellationToken cancellationToken = default
+        )
+        {
             var url = $"{BaseUrl}/conversations";
-            var jsonBody = $"{{\"avatarId\":{EncodeJsonString(_options.CharacterId)}}}";
+            var jsonBody = $"{{\"avatarId\":{EncodeJsonString(_options.CharacterId)}{EncodeCapabilities(capabilities)}}}";
 
             using (var request = CreateJsonPostRequest(url, jsonBody, NpcifyPerformanceCodec.MediaType, null, renderSessionId))
             using (var response = await _httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false))
@@ -179,7 +193,7 @@ namespace Npcify.Sdk.Api
             }
         }
 
-        public async Task<StagingResultPayload> CreateStagingAsync(
+        public Task<StagingResultPayload> CreateStagingAsync(
             string conversationId,
             string message,
             string parentStagingId = null,
@@ -187,6 +201,34 @@ namespace Npcify.Sdk.Api
             string requestId = null,
             string renderSessionId = null,
             int maxRetries = 6,
+            CancellationToken cancellationToken = default
+        )
+        {
+            return CreateStagingAsync(
+                conversationId,
+                message,
+                parentStagingId,
+                silent,
+                requestId,
+                renderSessionId,
+                maxRetries,
+                null,
+                cancellationToken);
+        }
+
+        /// <summary>
+        /// Requests a turn. <paramref name="capabilities"/> declares what this client plays for
+        /// this turn, for example <c>motion_frames</c>; without it the turn gets prepared clips.
+        /// </summary>
+        public async Task<StagingResultPayload> CreateStagingAsync(
+            string conversationId,
+            string message,
+            string parentStagingId,
+            bool silent,
+            string requestId,
+            string renderSessionId,
+            int maxRetries,
+            IReadOnlyList<string> capabilities,
             CancellationToken cancellationToken = default
         )
         {
@@ -206,7 +248,7 @@ namespace Npcify.Sdk.Api
                 ? "null"
                 : EncodeJsonString(parentStagingId);
             var jsonBody =
-                $"{{\"content\":{EncodeJsonString(message)},\"silent\":{(silent ? "true" : "false")},\"incrementalPlayback\":true,\"parentStagingId\":{parentJson}}}";
+                $"{{\"content\":{EncodeJsonString(message)},\"silent\":{(silent ? "true" : "false")},\"incrementalPlayback\":true,\"parentStagingId\":{parentJson}{EncodeCapabilities(capabilities)}}}";
 
             int[] retryDelaysMs = { 0, 150, 300, 600, 1200, 2000, 2000 };
             Exception lastError = null;
@@ -253,6 +295,89 @@ namespace Npcify.Sdk.Api
             }
 
             throw lastError ?? new InvalidOperationException("Failed to create staging.");
+        }
+
+        /// <summary>
+        /// Recognises one recording (docs/voice-input.md): a WAV file of 16-bit mono PCM at
+        /// 16 kHz, at most 30 seconds. It starts no turn; send the text with CreateStagingAsync.
+        /// </summary>
+        public async Task<NpcifySpeechTranscript> RecognizeSpeechAsync(
+            string conversationId,
+            byte[] wav,
+            string language = null,
+            CancellationToken cancellationToken = default
+        )
+        {
+            if (string.IsNullOrWhiteSpace(conversationId))
+            {
+                throw new ArgumentException("Conversation ID is required.", nameof(conversationId));
+            }
+            if (wav == null || wav.Length <= 44)
+            {
+                throw new ArgumentException("The recording is empty.", nameof(wav));
+            }
+
+            var url = $"{BaseUrl}/conversations/{Uri.EscapeDataString(conversationId)}/speech";
+            if (!string.IsNullOrWhiteSpace(language))
+            {
+                url += "?language=" + Uri.EscapeDataString(language.Trim());
+            }
+            using (var request = CreateRequest(HttpMethod.Post, url, "application/json"))
+            {
+                request.Content = new ByteArrayContent(wav);
+                request.Content.Headers.ContentType = new MediaTypeHeaderValue("audio/wav");
+                using (var response = await _httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false))
+                {
+                    await EnsureSuccessAsync(response).ConfigureAwait(false);
+                    var json = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                    return new NpcifySpeechTranscript
+                    {
+                        Text = ExtractJsonStringField(json, "text") ?? string.Empty,
+                        Language = ExtractJsonStringField(json, "language"),
+                        DurationMs = ExtractJsonIntField(json, "durationMs"),
+                    };
+                }
+            }
+        }
+
+        /// <summary>
+        /// Warms up the live motion session of a conversation on the player's intent (docs/realtime-motion.md):
+        /// call it when the player starts to type or presses to talk. The server does nothing for a
+        /// character without live motion and limits warm-ups per player and network. Returns true when
+        /// a session warms up; a failure returns false and costs the turn nothing.
+        /// </summary>
+        public async Task<bool> WarmUpLiveMotionAsync(
+            string conversationId,
+            CancellationToken cancellationToken = default
+        )
+        {
+            if (string.IsNullOrWhiteSpace(conversationId))
+            {
+                return false;
+            }
+            var url = $"{BaseUrl}/conversations/{Uri.EscapeDataString(conversationId)}/motion/warm-up";
+            var jsonBody = "{\"capabilities\":[\"" + Npcify.Sdk.Motion.NpcifyMotionFrames.Capability + "\"]}";
+            try
+            {
+                using (var request = CreateJsonPostRequest(url, jsonBody, "application/json"))
+                using (var response = await _httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false))
+                {
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        return false;
+                    }
+                    var json = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                    return ExtractJsonBoolField(json, "warming");
+                }
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception)
+            {
+                return false;
+            }
         }
 
         public async Task<StagingResultPayload> GetStagingAsync(
@@ -365,9 +490,29 @@ namespace Npcify.Sdk.Api
                 Name = ExtractJsonStringField(json, "name"),
                 IdleAnimationId = ExtractJsonStringField(json, "idleAnimationId"),
                 AllowCustomReply = ExtractJsonBoolField(json, "allowCustomReply"),
+                SpeechInputEnabled = ExtractJsonBoolField(json, "speechInputEnabled"),
                 BakedConversationEnabled = ExtractJsonBoolField(json, "bakedConversationEnabled"),
                 BakedConversationRevision = ExtractJsonIntField(json, "bakedConversationRevision"),
+                RealtimeMotionEnabled = ExtractJsonBoolField(json, "realtimeMotionEnabled"),
             };
+        }
+
+        /// <summary>The capabilities field: none for null, an empty list for an empty one.</summary>
+        private static string EncodeCapabilities(IReadOnlyList<string> capabilities)
+        {
+            if (capabilities == null)
+            {
+                return string.Empty;
+            }
+            var items = new List<string>(capabilities.Count);
+            foreach (var capability in capabilities)
+            {
+                if (!string.IsNullOrWhiteSpace(capability))
+                {
+                    items.Add(EncodeJsonString(capability));
+                }
+            }
+            return ",\"capabilities\":[" + string.Join(",", items) + "]";
         }
 
         private static string EncodeJsonString(string value)

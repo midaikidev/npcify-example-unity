@@ -1,0 +1,26 @@
+{
+  "name": "Npcify.Sdk.Runtime.UniVrm",
+  "rootNamespace": "Npcify.Sdk",
+  "references": [
+    "Npcify.Sdk.Runtime",
+    "VRM10",
+    "UniGLTF.Utils"
+  ],
+  "includePlatforms": [],
+  "excludePlatforms": [],
+  "allowUnsafeCode": false,
+  "overrideReferences": false,
+  "precompiledReferences": [],
+  "autoReferenced": true,
+  "defineConstraints": [
+    "NPCIFY_UNIVRM"
+  ],
+  "versionDefines": [
+    {
+      "name": "com.vrmc.vrm",
+      "expression": "0.131.0",
+      "define": "NPCIFY_UNIVRM"
+    }
+  ],
+  "noEngineReferences": false
+}

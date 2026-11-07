@@ -9,16 +9,23 @@ namespace NpcifyDemo
     /// <summary>
     /// Smoke test that runs only with the <c>-npcifyAutotest &lt;folder&gt;</c> command-line
     /// argument. It walks to each NPC, talks, picks the first reply, saves screenshots
-    /// and quits with exit code 0 on success.
+    /// and quits with exit code 0 on success. With <c>-npcifyAutotestReply &lt;text&gt;</c> it types
+    /// that reply to an NPC that allows custom replies. For a character with live motion on it
+    /// reports the live frames of the reply and fails when none played.
     /// </summary>
     public sealed class DemoAutotest : MonoBehaviour
     {
         private const string Argument = "-npcifyAutotest";
+        private const string ReplyArgument = "-npcifyAutotestReply";
 
         private string _outputFolder;
+        private string _customReply;
         private NpcDialogueController _controller;
         private int _failures;
         private float _maxMouthOpenness;
+        private float _maxHandAboveShoulder = float.NegativeInfinity;
+        private float _maxLeftHandAboveShoulder = float.NegativeInfinity;
+        private float _maxLiveWeight;
 
         private void Awake()
         {
@@ -31,6 +38,8 @@ namespace NpcifyDemo
             }
             _outputFolder = index + 1 < args.Length ? args[index + 1] : Path.Combine(Application.persistentDataPath, "autotest");
             Directory.CreateDirectory(_outputFolder);
+            var reply = Array.IndexOf(args, ReplyArgument);
+            _customReply = reply >= 0 && reply + 1 < args.Length ? args[reply + 1] : null;
         }
 
         private IEnumerator Start()
@@ -65,7 +74,29 @@ namespace NpcifyDemo
                 Log($"{tag} choices: {string.Join(" | ", _controller.ChoiceLabels)} (max mouth openness {_maxMouthOpenness:F2})");
                 _maxMouthOpenness = 0f;
 
-                _controller.Choose(0);
+                var sentAt = Time.realtimeSinceStartup;
+                var runtime = npc.Character.Runtime;
+                void LogFrames(Npcify.Sdk.Motion.NpcifyMotionFramesEvent frames)
+                {
+                    var speech = npc.Character.Speech;
+                    Log($"{tag} live frames {frames.StartFrame}+{frames.FrameCount} (revision {frames.Revision}) at {Time.realtimeSinceStartup - sentAt:F2} s after the reply was sent" +
+                        (speech.Speaking ? $", staging time {npc.Character.Runtime.StagingPlayer.TimelineElapsedSeconds:F2} s" : ", before playback"));
+                }
+                runtime.OnMotionFrames += LogFrames;
+                var stream = runtime.ConversationStream;
+                Log($"{tag} conversation stream joined before the reply: {stream != null && stream.IsJoined(runtime.ConversationId)}");
+                if (_customReply != null && npc.AllowCustomReply)
+                {
+                    Log($"{tag} reply: {_customReply}");
+                    _controller.SendCustomReply(_customReply);
+                }
+                else
+                {
+                    _controller.Choose(0);
+                }
+                _maxHandAboveShoulder = float.NegativeInfinity;
+                _maxLeftHandAboveShoulder = float.NegativeInfinity;
+                _maxLiveWeight = 0f;
                 yield return new WaitForSeconds(0.5f);
                 if (npc.Mode == NpcConnectionMode.OfflineBaked)
                 {
@@ -73,8 +104,17 @@ namespace NpcifyDemo
                     // on its right must hear the voice louder in the right channel.
                     yield return MeasurePanning(tag, npc);
                 }
+                if (npc.Mode == NpcConnectionMode.OnlineApi)
+                {
+                    yield return WaitFor(() => npc.Character.Speech.Speaking, 90f, $"{tag} reply speech");
+                    Log($"{tag} reply plays {Time.realtimeSinceStartup - sentAt:F2} s after it was sent");
+                    yield return new WaitForSeconds(2.5f);
+                    yield return Capture($"{step++:00}-{tag}-reply-motion");
+                }
                 yield return WaitFor(() => _controller.IsChoosing, 90f, $"{tag} reply");
                 yield return Capture($"{step++:00}-{tag}-reply");
+                runtime.OnMotionFrames -= LogFrames;
+                LogLiveMotion(tag, npc);
                 Log($"{tag} reply choices: {string.Join(" | ", _controller.ChoiceLabels)}");
                 if (_controller.ChoiceLabels.Contains("Try again"))
                 {
@@ -100,6 +140,51 @@ namespace NpcifyDemo
             {
                 _maxMouthOpenness = Mathf.Max(_maxMouthOpenness, talking.Character.Expressions.MouthOpenness);
             }
+        }
+
+        private void LateUpdate()
+        {
+            var talking = _controller != null ? _controller.ActiveNpc : null;
+            var character = talking != null ? talking.Character : null;
+            if (character == null)
+            {
+                return;
+            }
+            _maxLiveWeight = Mathf.Max(_maxLiveWeight, (float)character.LiveMotion.Weight);
+            var hand = character.GetBone(HumanBodyBones.RightHand);
+            var shoulder = character.GetBone(HumanBodyBones.RightUpperArm);
+            if (hand != null && shoulder != null)
+            {
+                _maxHandAboveShoulder = Mathf.Max(_maxHandAboveShoulder, hand.position.y - shoulder.position.y);
+            }
+            var leftHand = character.GetBone(HumanBodyBones.LeftHand);
+            var leftShoulder = character.GetBone(HumanBodyBones.LeftUpperArm);
+            if (leftHand != null && leftShoulder != null)
+            {
+                _maxLeftHandAboveShoulder = Mathf.Max(_maxLeftHandAboveShoulder, leftHand.position.y - leftShoulder.position.y);
+            }
+        }
+
+        /// <summary>Reports the live frames of the last reply; a character with live motion on must play some.</summary>
+        private void LogLiveMotion(string tag, NpcifyNpc npc)
+        {
+            var character = npc.Character;
+            var runtime = character.Runtime;
+            var inEffect = runtime.LiveMotionInEffect == true;
+            var stats = character.LiveMotion.GetStats(runtime.ActiveStagingId);
+            if (stats == null || stats.FramesPlayed == 0)
+            {
+                Log($"{tag} live motion: no frames played (character live motion {(inEffect ? "on" : "off")}, rig ready {character.LiveMotionReady})");
+                if (inEffect && character.LiveMotionReady)
+                {
+                    _failures++;
+                }
+                return;
+            }
+            Log($"{tag} live motion: {stats.FramesPlayed} frames played, {stats.FramesReceived} frames received " +
+                $"(last revision {stats.LastRevision}), first frame at {stats.FirstFrameTime:F2} s of the staging clock, " +
+                $"max weight {_maxLiveWeight:F2}, hands at most {_maxHandAboveShoulder:F2} m (right) and " +
+                $"{_maxLeftHandAboveShoulder:F2} m (left) above their shoulders");
         }
 
         private void MovePlayerNear(NpcifyNpc npc)

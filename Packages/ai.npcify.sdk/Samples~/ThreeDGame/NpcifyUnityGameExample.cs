@@ -37,6 +37,10 @@ namespace Npcify.Sdk.Samples
                 Debug.Log($"Subtitle: {revealedText}");
             };
 
+            // Hold V to talk; the release sends the speech as the player's message
+            character.PushToTalkKey = KeyCode.V;
+            character.TranscriptReceived += text => Debug.Log($"Player: {text}");
+
             character.SetEmotion("happy", 0.6f);
             await character.SpeakAsync("Welcome to the realm, traveler! How can I assist you?");
         }

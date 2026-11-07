@@ -13,6 +13,8 @@ Unity Package Manager (UPM) client for embedding Npcify AI characters into Unity
   - Spatial 3D `AudioSource` playback with automatic WAV/PCM16/Float32 `AudioClip` construction and live RMS amplitude analysis. See [Spatial voice](#spatial-voice).
   - Real-time `Speech` state (`Speaking`, `Thinking`, `CurrentSpeech`, `CurrentText`, `RevealedText`, `Options`, `Cursor`) and `Expressions.MouthOpenness`.
   - Custom Unity Editor Inspector (`NpcifyCharacterEditor`) to import `npcify-unity-sdk.json` exported from the Npcify dashboard and auto-bind avatar rigs.
+  - Voice input: push-to-talk key or UI button, `StartListening` / `StopListeningAsync` / `CancelListening`, and the `InputModes` configuration. See [Voice input](#voice-input).
+  - Live motion: the generated body motion of each reply on a UniVRM 1.0 model, and `PrepareLiveMotionAsync()`. See [Live motion](#live-motion).
 
 ## Installation
 
@@ -30,14 +32,14 @@ Add the Npcify scoped registry and `ai.npcify.sdk` to `Packages/manifest.json`:
     }
   ],
   "dependencies": {
-    "ai.npcify.sdk": "0.2.1"
+    "ai.npcify.sdk": "0.5.0"
   }
 }
 ```
 
 ### Option 2: Download `.tgz` Tarball
 
-Download the latest UPM package tarball from `https://npcify.ai/sdk/unity/latest` (or a specific version from `https://npcify.ai/sdk/unity/app/0.2.1`), then in Unity open **Window > Package Manager > + > Install package from tarball...** and select the downloaded `ai.npcify.sdk-0.2.1.tgz` file.
+Download the latest UPM package tarball from `https://npcify.ai/sdk/unity/latest` (or a specific version from `https://npcify.ai/sdk/unity/app/0.5.0`), then in Unity open **Window > Package Manager > + > Install package from tarball...** and select the downloaded `ai.npcify.sdk-0.5.0.tgz` file.
 
 ## Quick Start (3D Game Integration)
 
@@ -104,6 +106,93 @@ public sealed class NpcifyGameExample : MonoBehaviour
   staging. Play them with your own animation system (for example UniVRM
   `Vrm10AnimationInstance` for the character's VRMA files). An `Animator` with a
   controller that has a state of that name also plays it.
+
+## Voice Input
+
+The player can talk to the character when its owner turned voice input on
+(the STT tab of the character in the dashboard; see
+[voice input](../../docs/voice-input.md)). The microphone records while the
+player holds a key or a button; at the release the recording goes to the
+server, and its text becomes the player's message. The runtime reads the
+character's info once before the conversation starts; with voice input off,
+listening throws `NpcifyInputModeException` and nothing is recorded or sent.
+
+- **Trigger:** set `PushToTalkKey` in the Inspector (legacy Input Manager), add
+  `NpcifyPushToTalkButton` to a UI element (needs `com.unity.ugui`), or call
+  `BeginPushToTalk()` and `EndPushToTalk()` from your own input, for example an
+  Input System action. A press shorter than 0.3 s, or a release before the
+  microphone gave any audio (a permission prompt, a slow device), sends
+  nothing and raises `PushToTalkShortPress`: show "hold to talk". A release
+  after the microphone started sends what it recorded. Focus loss cancels the
+  recording.
+- **By code:** `StartListening(options)` starts recording and its task gives the
+  result when listening ends: `StopListeningAsync()`, `MaxDurationSeconds`
+  (30 s at most) or `EndOnSilenceSeconds` (stop after this much silence that
+  follows speech). `CancelListening()` discards it. Example: listen when the
+  character stops speaking.
+
+  ```csharp
+  character.OnSpeechEnd += _ => character.StartListening(new NpcifyListeningOptions
+  {
+      EndOnSilenceSeconds = 0.8f,
+      MaxDurationSeconds = 10f,
+  });
+  character.TranscriptReceived += text => Debug.Log($"Player: {text}");
+  ```
+
+- **Input modes:** `InputModes` (Inspector or `NpcifyOptions.InputModes`) is a
+  list of `Options`, `Text` and `Voice`; one mode forces it. Empty: every mode
+  that the character permits. A baked conversation permits only `Options`, a
+  character without custom replies permits only `Options`, and `Voice` needs
+  the character's voice input; another configuration throws
+  `NpcifyInputModeException`. With `InputModes` set,
+  `SpeakAsync` (typed text) needs `Text`, `ReplyAsync` needs `Options` or
+  `Text`, and listening needs `Voice`.
+- **Language:** `speechLanguage` is an optional hint (`ja`, `zh`, `en`). Without
+  it the server detects the language.
+- **Microphone:** the SDK records with `UnityEngine.Microphone` at 16 kHz and asks
+  for the permission on the first recording (iOS and Android). Set
+  **Player Settings > Microphone Usage Description** for iOS. Unity WebGL has no
+  microphone; use the web SDK there.
+- **Upload:** at the release the SDK sends one WAV file to
+  `POST /conversations/:id/speech`, then the text as a turn. The server charges
+  the recognition to the character owner at the provider's price.
+
+## Live Motion
+
+When the owner of a character turns **Live motion** on, the server generates
+the body motion of each reply and streams it as pose frames
+([real-time motion](../../docs/realtime-motion.md)). The SDK plays them on a
+UniVRM 1.0 model; for any other character it keeps the prepared animation
+clips.
+
+- **Model:** `NpcifyCharacter` finds the `Vrm10Instance` of its avatar root and
+  adds `NpcifyVrm10LiveMotion` (assembly `Npcify.Sdk.Runtime.UniVrm`, compiled
+  when the project has `com.vrmc.vrm` 0.131 or later). Load the model with
+  `ControlRigGenerationOption.Generate`, and access `Vrm10Instance.Runtime` once
+  right after loading, before you rotate or animate the model: UniVRM keeps the
+  bone rotations of that moment as the T-pose.
+- **Animation:** play idle and other animations as before, as a VRMA
+  (`Vrm10Runtime.VrmAnimation`) or with an Animator. The live pose blends over
+  them in UniVRM's update (in over 0.3 s, out over 0.5 s), before the spring
+  bones.
+- **Warm-up:** call `PrepareLiveMotionAsync()` when the player shows that they
+  will reply, for example when the reply field gets focus or the player opens
+  the conversation with a talk key. Push-to-talk calls it at the press. It runs
+  once per conversation and costs the character owner only when the character
+  has live motion on.
+- **Options:** `liveMotion` (Inspector, or `NpcifyOptions.LiveMotion.Enabled`)
+  turns it off; `liveMotionRootMode` `World` keeps the generated hips movement
+  (default `Anchored`: the character stays where you put it).
+- **State:** `LiveMotion.Weight`, `LiveMotion.GetStats(stagingId)` (frames
+  received and played, the staging time of the first played frame),
+  `Runtime.OnMotionFrames` and `LiveMotionReady`.
+- **Other rigs:** implement `INpcifyLiveMotionTarget` and set
+  `LiveMotionTarget`; `NpcifyLiveMotionRig` maps the frames onto your rig from
+  its T-pose positions.
+- **Transport:** the frames come on the conversation stream (Socket.IO over a
+  WebSocket, `System.Net.WebSockets.ClientWebSocket`). WebGL builds have no
+  `ClientWebSocket`, so they keep the prepared clips.
 
 ## Spatial Voice
 

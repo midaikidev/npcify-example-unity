@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Text;
 using System.Threading;
@@ -6,6 +7,8 @@ using System.Threading.Tasks;
 using Npcify.Sdk.Api;
 using Npcify.Sdk.Conversation;
 using Npcify.Sdk.Models;
+using Npcify.Sdk.Motion;
+using Npcify.Sdk.Speech;
 
 namespace Npcify.Sdk.Character
 {
@@ -20,13 +23,19 @@ namespace Npcify.Sdk.Character
                 : 0.0;
     }
 
-    public sealed class NpcifyCharacterRuntime : IDisposable
+    public sealed partial class NpcifyCharacterRuntime : IDisposable
     {
         private readonly NpcifyOptions _options;
         private readonly NpcifyApiClient _api;
         private readonly NpcifyFacialMixer _expressions;
         private readonly NpcifyVisemePlayer _visemePlayer;
         private readonly NpcifyStagingPlayer _stagingPlayer;
+        private readonly NpcifyLiveMotionPlayer _liveMotion;
+        private readonly Func<NpcifyConversationStream> _streamFactory;
+        // Live motion work that background threads hand to the thread that calls Tick.
+        private readonly ConcurrentQueue<Action> _mainThreadWork = new ConcurrentQueue<Action>();
+        private NpcifyConversationStream _stream;
+        private string _liveMotionPrepared;
 
         private NpcifyBakedConversation _bakedConversation;
         private string _conversationId;
@@ -35,16 +44,25 @@ namespace Npcify.Sdk.Character
         private float _volume = 1f;
         private bool _muted;
         private string _currentAnimation = "idle";
+        private IReadOnlyList<NpcifyInputMode> _inputModes;
+        // The character's voice input switch, after its info was read.
+        private bool? _speechInputEnabled;
 
-        public NpcifyCharacterRuntime(NpcifyOptions options, NpcifyApiClient apiClient = null)
+        public NpcifyCharacterRuntime(
+            NpcifyOptions options,
+            NpcifyApiClient apiClient = null,
+            Func<NpcifyConversationStream> streamFactory = null)
         {
             _options = options ?? throw new ArgumentNullException(nameof(options));
+            NpcifyInputModes.Validate(options.InputModes);
             _volume = options.Volume;
             _muted = options.Muted;
             _api = apiClient ?? new NpcifyApiClient(options);
+            _streamFactory = streamFactory ?? (() => new NpcifyConversationStream(options));
             _expressions = new NpcifyFacialMixer();
             _visemePlayer = new NpcifyVisemePlayer();
             _stagingPlayer = new NpcifyStagingPlayer(_expressions, _visemePlayer);
+            _liveMotion = new NpcifyLiveMotionPlayer(options.LiveMotion);
 
             _stagingPlayer.OnDialogueBlockStarted += HandleDialogueBlockStarted;
             _stagingPlayer.OnCharacterRevealed += (text, cue) => OnCharacterRevealed?.Invoke(text, cue);
@@ -59,8 +77,19 @@ namespace Npcify.Sdk.Character
         public event Action<string, StagingCharacterCue> OnCharacterRevealed;
         public event Action<string, bool> OnAnimationPlayRequested;
         public event Action<Exception> OnError;
+        /// <summary>The recognised text of the player's speech.</summary>
+        public event Action<NpcifySpeechTranscript> OnTranscript;
 
         public NpcifyOptions Options => _options;
+
+        /// <summary>
+        /// The input modes in use: the configured modes after the character's check, or every
+        /// mode that the character permits.
+        /// </summary>
+        public IReadOnlyList<NpcifyInputMode> InputModes =>
+            _inputModes
+            ?? NpcifyInputModes.Validate(_options.InputModes)
+            ?? NpcifyInputModes.Permitted(true, _bakedConversation != null, true);
 
         public NpcifyApiClient Api => _api;
 
@@ -113,8 +142,32 @@ namespace Npcify.Sdk.Character
 
         public void AttachBakedConversation(NpcifyBakedConversation bakedConversation)
         {
-            _bakedConversation = bakedConversation ?? throw new ArgumentNullException(nameof(bakedConversation));
+            if (bakedConversation == null)
+            {
+                throw new ArgumentNullException(nameof(bakedConversation));
+            }
+            _inputModes = NpcifyInputModes.Resolve(_options.InputModes, false, true, false);
+            _bakedConversation = bakedConversation;
             _conversationId = "baked:" + bakedConversation.Asset.AvatarId;
+        }
+
+        /// <summary>
+        /// Compares the input modes with the character. Throws NpcifyInputModeException when the
+        /// character does not permit a configured mode.
+        /// </summary>
+        public void ApplyCharacterInfo(NpcifyAssetInfo info)
+        {
+            if (info == null)
+            {
+                throw new ArgumentNullException(nameof(info));
+            }
+            _speechInputEnabled = info.SpeechInputEnabled;
+            _liveMotionInEffect = info.RealtimeMotionEnabled;
+            _inputModes = NpcifyInputModes.Resolve(
+                _options.InputModes,
+                info.AllowCustomReply,
+                info.BakedConversationEnabled || _bakedConversation != null,
+                info.SpeechInputEnabled);
         }
 
         public StagingResultPayload StartBakedConversation(string stagingId = null)
@@ -143,13 +196,19 @@ namespace Npcify.Sdk.Character
                 return await StartBakedConversationAsync(null, cancellationToken);
             }
 
+            await EnsureInputModesAsync(cancellationToken);
             _thinking = true;
             try
             {
                 // No ConfigureAwait(false): game engines resume on their main thread.
-                var created = await _api.CreateConversationAsync(null, cancellationToken);
+                var created = await _api.CreateConversationAsync(null, LiveMotionCapabilities, cancellationToken);
                 _conversationId = created.ConversationId;
                 _activeStagingId = created.OpeningStaging?.StagingId;
+                if (WantsLiveMotion)
+                {
+                    // Join the stream early, so that the first turn does not wait for it.
+                    _ = JoinLiveMotionStreamAsync(_conversationId, CancellationToken.None);
+                }
                 if (created.OpeningStaging != null)
                 {
                     await PrepareAndPlayAsync(created.OpeningStaging, cancellationToken);
@@ -165,9 +224,152 @@ namespace Npcify.Sdk.Character
             }
         }
 
-        public async Task<StagingResultPayload> SpeakAsync(
+        /// <summary>Sends typed text as the player's message. With InputModes set, it needs Text.</summary>
+        public Task<StagingResultPayload> SpeakAsync(
             string message,
             CancellationToken cancellationToken = default
+        )
+        {
+            if (_options.InputModes != null && _options.InputModes.Count > 0)
+            {
+                RequireMode(NpcifyInputMode.Text, "Typed replies are off");
+            }
+            return SendAsync(message, cancellationToken);
+        }
+
+        /// <summary>Sends one of the reply options. With InputModes set, it needs Options or Text.</summary>
+        public Task<StagingResultPayload> ReplyAsync(
+            string optionLabel,
+            CancellationToken cancellationToken = default
+        )
+        {
+            if (_options.InputModes != null && _options.InputModes.Count > 0 &&
+                !NpcifyInputModes.Contains(InputModes, NpcifyInputMode.Text))
+            {
+                RequireMode(NpcifyInputMode.Options, "Reply options are off");
+            }
+            return SendAsync(optionLabel, cancellationToken);
+        }
+
+        /// <summary>
+        /// Recognises one recording (WAV, 16-bit mono PCM at 16 kHz) and, unless
+        /// options.Send is false, sends the text as the player's message. An empty text
+        /// starts no turn. It needs the Voice mode.
+        /// </summary>
+        public async Task<NpcifySpeechInputResult> RecognizeAndReplyAsync(
+            byte[] wav,
+            NpcifyListeningOptions options = null,
+            CancellationToken cancellationToken = default
+        )
+        {
+            RequireVoice();
+            options = options ?? new NpcifyListeningOptions();
+            await EnsureInputModesAsync(cancellationToken);
+            RequireVoice();
+            if (string.IsNullOrEmpty(_conversationId))
+            {
+                var createdConv = await _api.CreateConversationAsync(null, LiveMotionCapabilities, cancellationToken);
+                _conversationId = createdConv.ConversationId;
+                _activeStagingId = createdConv.OpeningStaging?.StagingId;
+            }
+            NpcifySpeechTranscript transcript;
+            try
+            {
+                transcript = await _api.RecognizeSpeechAsync(
+                    _conversationId,
+                    wav,
+                    options.Language,
+                    cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                OnError?.Invoke(ex);
+                throw;
+            }
+            OnTranscript?.Invoke(transcript);
+            var text = transcript.Text?.Trim() ?? string.Empty;
+            var result = new NpcifySpeechInputResult
+            {
+                Text = text,
+                Language = transcript.Language,
+                DurationMs = transcript.DurationMs,
+            };
+            if (options.Send && text.Length > 0)
+            {
+                result.Sent = true;
+                result.Turn = SendAsync(text, cancellationToken);
+            }
+            return result;
+        }
+
+        /// <summary>Sends a recognised text that RecognizeAndReplyAsync did not send. It needs Voice.</summary>
+        public Task<StagingResultPayload> SendTranscriptAsync(
+            string text,
+            CancellationToken cancellationToken = default
+        )
+        {
+            RequireVoice();
+            return SendAsync(text, cancellationToken);
+        }
+
+        /// <summary>Throws NpcifyInputModeException when the input modes or the conversation do not permit voice.</summary>
+        public void RequireVoice()
+        {
+            if (_bakedConversation != null)
+            {
+                throw new NpcifyInputModeException(
+                    "Voice input is not available in a baked (offline) conversation.");
+            }
+            if (_speechInputEnabled == false)
+            {
+                throw new NpcifyInputModeException(
+                    "Voice input is off for this character. Its owner turns it on in the STT tab.");
+            }
+            RequireMode(NpcifyInputMode.Voice, "Voice input is off");
+        }
+
+        private void RequireMode(NpcifyInputMode mode, string reason)
+        {
+            var modes = InputModes;
+            if (!NpcifyInputModes.Contains(modes, mode))
+            {
+                var names = new List<string>();
+                foreach (var entry in modes)
+                {
+                    names.Add(NpcifyInputModes.Name(entry));
+                }
+                throw new NpcifyInputModeException(
+                    reason + ": InputModes is [" + string.Join(", ", names) + "].");
+            }
+        }
+
+        /// <summary>
+        /// The character's info is read once: a configured InputModes is checked with it, and
+        /// voice needs the owner's voice input. Without a configuration, a failed read leaves
+        /// the rules to the server, as before.
+        /// </summary>
+        private async Task EnsureInputModesAsync(CancellationToken cancellationToken)
+        {
+            if (_inputModes != null)
+            {
+                return;
+            }
+            var configured = _options.InputModes != null && _options.InputModes.Count > 0;
+            NpcifyAssetInfo info;
+            try
+            {
+                info = await _api.GetInfoAsync(cancellationToken);
+            }
+            catch (Exception error) when (!configured && !(error is OperationCanceledException))
+            {
+                return;
+            }
+            ApplyCharacterInfo(info);
+        }
+
+        private async Task<StagingResultPayload> SendAsync(
+            string message,
+            CancellationToken cancellationToken
         )
         {
             if (string.IsNullOrWhiteSpace(message))
@@ -195,11 +397,17 @@ namespace Npcify.Sdk.Character
             {
                 if (string.IsNullOrEmpty(_conversationId))
                 {
-                    var createdConv = await _api.CreateConversationAsync(null, cancellationToken);
+                    var createdConv = await _api.CreateConversationAsync(null, LiveMotionCapabilities, cancellationToken);
                     _conversationId = createdConv.ConversationId;
                     _activeStagingId = createdConv.OpeningStaging?.StagingId;
                 }
 
+                // Live motion frames arrive on the conversation stream while the server makes the
+                // turn: declare them only when the stream has joined the conversation. Always send
+                // the list: without it the server uses the capabilities of the conversation.
+                var capabilities = WantsLiveMotion && await JoinLiveMotionStreamAsync(_conversationId, cancellationToken)
+                    ? LiveMotionCapabilities
+                    : Array.Empty<string>();
                 var staging = await _api.CreateStagingAsync(
                     _conversationId,
                     message,
@@ -208,6 +416,7 @@ namespace Npcify.Sdk.Character
                     null,
                     null,
                     6,
+                    capabilities,
                     cancellationToken
                 );
 
@@ -222,14 +431,6 @@ namespace Npcify.Sdk.Character
                 OnError?.Invoke(ex);
                 throw;
             }
-        }
-
-        public Task<StagingResultPayload> ReplyAsync(
-            string optionLabel,
-            CancellationToken cancellationToken = default
-        )
-        {
-            return SpeakAsync(optionLabel, cancellationToken);
         }
 
         public StagingResultPayload SelectBakedStaging(string stagingId)
@@ -249,6 +450,8 @@ namespace Npcify.Sdk.Character
         public void ResetConversation()
         {
             StopSpeaking();
+            _stream?.Leave();
+            _liveMotionPrepared = null;
             _activeStagingId = null;
             _conversationId = _bakedConversation != null ? "baked:" + _bakedConversation.Asset.AvatarId : null;
         }
@@ -262,6 +465,7 @@ namespace Npcify.Sdk.Character
 
             _thinking = false;
             _activeStagingId = staging.StagingId;
+            LoadStoredMotion(staging);
             OnSpeechStart?.Invoke(staging);
             _stagingPlayer.Play(staging);
         }
@@ -324,7 +528,17 @@ namespace Npcify.Sdk.Character
 
         public void Tick(double deltaTimeSeconds, float fallbackAudioRms = 0f)
         {
+            while (_mainThreadWork.TryDequeue(out var work))
+            {
+                work();
+            }
             _stagingPlayer.Tick(deltaTimeSeconds, fallbackAudioRms);
+            // Live motion follows the staging clock; no staging: blend back to idle.
+            var playing = _stagingPlayer.IsPlaying ? _stagingPlayer.CurrentStaging : null;
+            _liveMotion.Update(
+                deltaTimeSeconds,
+                playing?.StagingId,
+                playing != null ? _stagingPlayer.TimelineElapsedSeconds : (double?)null);
         }
 
         private void HandleDialogueBlockStarted(StagingDialogueBlock block)
@@ -340,176 +554,9 @@ namespace Npcify.Sdk.Character
             }
         }
 
-        /// <summary>
-        /// True when the audio bytes are WAV or raw PCM, which <see cref="DecodeAudioBytes"/> can decode.
-        /// Compressed audio, such as MPEG, must be decoded by the engine integration.
-        /// </summary>
-        public static bool IsPcmAudio(StagingAudioSource audio)
-        {
-            if (audio?.Data == null || audio.Data.Length == 0)
-            {
-                return false;
-            }
-            var data = audio.Data;
-            if (data.Length >= 12 && data[0] == (byte)'R' && data[1] == (byte)'I' && data[2] == (byte)'F' && data[3] == (byte)'F')
-            {
-                return true;
-            }
-            var mime = audio.MimeType ?? string.Empty;
-            return mime.IndexOf("wav", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                   mime.IndexOf("pcm", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                   mime.IndexOf("L16", StringComparison.OrdinalIgnoreCase) >= 0;
-        }
-
-        public static NpcifyDecodedAudio DecodeAudioBytes(
-            byte[] bytes,
-            int defaultSampleRate = 24000,
-            int defaultChannels = 1
-        )
-        {
-            if (bytes == null || bytes.Length == 0)
-            {
-                return new NpcifyDecodedAudio
-                {
-                    Samples = Array.Empty<float>(),
-                    SampleRate = defaultSampleRate > 0 ? defaultSampleRate : 24000,
-                    Channels = defaultChannels > 0 ? defaultChannels : 1,
-                };
-            }
-
-            if (bytes.Length >= 44 &&
-                bytes[0] == (byte)'R' &&
-                bytes[1] == (byte)'I' &&
-                bytes[2] == (byte)'F' &&
-                bytes[3] == (byte)'F' &&
-                bytes[8] == (byte)'W' &&
-                bytes[9] == (byte)'A' &&
-                bytes[10] == (byte)'V' &&
-                bytes[11] == (byte)'E')
-            {
-                return DecodeWavBytes(bytes, defaultSampleRate, defaultChannels);
-            }
-
-            return DecodeRawPcm16(
-                bytes,
-                defaultSampleRate > 0 ? defaultSampleRate : 24000,
-                defaultChannels > 0 ? defaultChannels : 1
-            );
-        }
-
-        private static NpcifyDecodedAudio DecodeWavBytes(byte[] bytes, int fallbackRate, int fallbackChannels)
-        {
-            var audioFormat = 1;
-            var channels = fallbackChannels > 0 ? fallbackChannels : 1;
-            var sampleRate = fallbackRate > 0 ? fallbackRate : 24000;
-            var bitsPerSample = 16;
-            var dataOffset = -1;
-            var dataSize = 0;
-
-            var offset = 12;
-            while (offset + 8 <= bytes.Length)
-            {
-                var chunkId = Encoding.ASCII.GetString(bytes, offset, 4);
-                var chunkSize =
-                    bytes[offset + 4] |
-                    (bytes[offset + 5] << 8) |
-                    (bytes[offset + 6] << 16) |
-                    (bytes[offset + 7] << 24);
-                offset += 8;
-
-                if (chunkSize < 0 || offset + chunkSize > bytes.Length)
-                {
-                    break;
-                }
-
-                if (chunkId == "fmt " && chunkSize >= 16)
-                {
-                    audioFormat = bytes[offset] | (bytes[offset + 1] << 8);
-                    channels = Math.Max(1, bytes[offset + 2] | (bytes[offset + 3] << 8));
-                    sampleRate =
-                        bytes[offset + 4] |
-                        (bytes[offset + 5] << 8) |
-                        (bytes[offset + 6] << 16) |
-                        (bytes[offset + 7] << 24);
-                    bitsPerSample = bytes[offset + 14] | (bytes[offset + 15] << 8);
-                }
-                else if (chunkId == "data")
-                {
-                    dataOffset = offset;
-                    dataSize = chunkSize;
-                    break;
-                }
-
-                offset += chunkSize + (chunkSize & 1);
-            }
-
-            if (dataOffset < 0 || dataSize <= 0)
-            {
-                return new NpcifyDecodedAudio
-                {
-                    Samples = Array.Empty<float>(),
-                    SampleRate = sampleRate,
-                    Channels = channels,
-                };
-            }
-
-            if (audioFormat == 3 && bitsPerSample == 32)
-            {
-                var sampleCount = dataSize / 4;
-                var samples = new float[sampleCount];
-                Buffer.BlockCopy(bytes, dataOffset, samples, 0, sampleCount * 4);
-                return new NpcifyDecodedAudio
-                {
-                    Samples = samples,
-                    SampleRate = sampleRate,
-                    Channels = channels,
-                };
-            }
-
-            if (bitsPerSample == 16)
-            {
-                var sampleCount = dataSize / 2;
-                var samples = new float[sampleCount];
-                for (var i = 0; i < sampleCount; i++)
-                {
-                    var pcm = (short)(bytes[dataOffset + i * 2] | (bytes[dataOffset + i * 2 + 1] << 8));
-                    samples[i] = pcm / 32768f;
-                }
-                return new NpcifyDecodedAudio
-                {
-                    Samples = samples,
-                    SampleRate = sampleRate,
-                    Channels = channels,
-                };
-            }
-
-            return new NpcifyDecodedAudio
-            {
-                Samples = Array.Empty<float>(),
-                SampleRate = sampleRate,
-                Channels = channels,
-            };
-        }
-
-        private static NpcifyDecodedAudio DecodeRawPcm16(byte[] bytes, int sampleRate, int channels)
-        {
-            var sampleCount = bytes.Length / 2;
-            var samples = new float[sampleCount];
-            for (var i = 0; i < sampleCount; i++)
-            {
-                var pcm = (short)(bytes[i * 2] | (bytes[i * 2 + 1] << 8));
-                samples[i] = pcm / 32768f;
-            }
-            return new NpcifyDecodedAudio
-            {
-                Samples = samples,
-                SampleRate = sampleRate,
-                Channels = channels,
-            };
-        }
-
         public void Dispose()
         {
+            _stream?.Dispose();
             _api.Dispose();
         }
     }

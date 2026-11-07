@@ -178,6 +178,8 @@ namespace Npcify.Sdk.Models
                 }
             }
 
+            timeline.Motions = Npcify.Sdk.Motion.NpcifyMotionFrames.ParsePrompts(GetList(map, "motions"));
+            timeline.Motion = Npcify.Sdk.Motion.NpcifyMotionFrames.TryParseTrack(GetMap(map, "motion"));
             return timeline;
         }
 

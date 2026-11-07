@@ -14,7 +14,7 @@ namespace Npcify.Sdk.Unity
 {
     [AddComponentMenu("Npcify/Npcify Character")]
     [DisallowMultipleComponent]
-    public sealed class NpcifyCharacter : MonoBehaviour
+    public sealed partial class NpcifyCharacter : MonoBehaviour
     {
         [Header("Npcify Connection")]
         [SerializeField] private string characterId = string.Empty;
@@ -132,6 +132,10 @@ namespace Npcify.Sdk.Unity
             characterId = options.CharacterId ?? string.Empty;
             apiKey = options.ResolvedToken;
             endpoint = string.IsNullOrWhiteSpace(options.BaseUrl) ? "https://api.npcify.ai" : options.BaseUrl;
+            inputModes = options.InputModes != null
+                ? new List<Npcify.Sdk.Speech.NpcifyInputMode>(options.InputModes)
+                : new List<Npcify.Sdk.Speech.NpcifyInputMode>();
+            ApplyLiveMotionOptions(options.LiveMotion);
             RebuildRuntime();
         }
 
@@ -191,6 +195,7 @@ namespace Npcify.Sdk.Unity
                     }
                 }
             }
+            FindLiveMotionTarget();
         }
 
         public Task<StagingResultPayload> CreateConversationAsync(
@@ -368,7 +373,9 @@ namespace Npcify.Sdk.Unity
         {
             EnsureInitialized();
             _runtime.Expressions.AutoBlinkEnabled = autoBlink;
+            UpdateVoiceInput();
             UpdateGazeLayer();
+            UpdateLiveMotionTarget();
             var rms = GetAudioRmsAmplitude();
             _runtime.Tick(Time.deltaTime, rms);
         }
@@ -380,6 +387,7 @@ namespace Npcify.Sdk.Unity
 
         private void OnDestroy()
         {
+            CancelListening();
             ReleaseActiveDynamicClip();
             ReleasePreparedClips(null);
             if (_runtime != null)
@@ -407,6 +415,10 @@ namespace Npcify.Sdk.Unity
                 CharacterId = string.IsNullOrWhiteSpace(characterId) ? "unconfigured-character" : characterId,
                 ApiKey = apiKey,
                 BaseUrl = string.IsNullOrWhiteSpace(endpoint) ? "https://api.npcify.ai" : endpoint,
+                InputModes = inputModes != null && inputModes.Count > 0
+                    ? new List<Npcify.Sdk.Speech.NpcifyInputMode>(inputModes)
+                    : null,
+                LiveMotion = BuildLiveMotionOptions(),
             };
 
             _runtime = new NpcifyCharacterRuntime(options);
@@ -418,6 +430,8 @@ namespace Npcify.Sdk.Unity
             _runtime.OnAudioBlock += HandleAudioBlock;
             _runtime.OnAnimationPlayRequested += HandleAnimationPlayRequested;
             _runtime.OnError += ex => OnError?.Invoke(ex);
+            _runtime.OnTranscript += transcript => TranscriptReceived?.Invoke(transcript.Text);
+            BindLiveMotionTarget();
         }
 
         private void HandleAudioBlock(StagingDialogueBlock block, NpcifyDecodedAudio decodedAudio)

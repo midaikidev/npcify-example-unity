@@ -72,8 +72,15 @@ typewriter text) and writes the face blend shapes of the VRM model.
 - **Online NPC.** The game downloads the VRM model and the animations through
   the API, then `CreateConversationAsync()` and `ReplyAsync()` request each
   reply from the API.
+- **Live motion.** When the owner of the online character turns **Live
+  motion** on, the server generates the body motion of each reply and the SDK
+  plays it over the idle VRMA on the UniVRM control rig. The game calls
+  `PrepareLiveMotionAsync()` when the player opens the conversation with the
+  talk key and when the reply field gets focus, so that the first reply does
+  not wait for the GPU. A character without live motion plays its animation
+  clips.
 
-The Npcify Unity SDK is in `Packages/ai.npcify.sdk` (version 0.2.1).
+The Npcify Unity SDK is in `Packages/ai.npcify.sdk` (version 0.5.0).
 
 ### Anime look
 
@@ -122,6 +129,12 @@ saves screenshots and quits with exit code 0 when everything worked:
 ```bash
 "Builds/macOS/NpcifyUnityDemo.app/Contents/MacOS/Npcify Unity Demo" -npcifyAutotest /tmp/npcify-shots -logFile /tmp/npcify.log
 ```
+
+`-npcifyAutotestReply "Please wave at me."` types that reply to the online
+NPC in place of the first choice. For a character with live motion on, the
+log reports the live frames of the reply (when they arrived, how many played,
+the first frame's time on the staging clock, how high each hand went), and
+the test fails when no frame played.
 
 ## Licenses
 

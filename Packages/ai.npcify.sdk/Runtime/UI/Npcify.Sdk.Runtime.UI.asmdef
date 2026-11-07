@@ -1,0 +1,25 @@
+{
+  "name": "Npcify.Sdk.Runtime.UI",
+  "rootNamespace": "Npcify.Sdk",
+  "references": [
+    "Npcify.Sdk.Runtime",
+    "UnityEngine.UI"
+  ],
+  "includePlatforms": [],
+  "excludePlatforms": [],
+  "allowUnsafeCode": false,
+  "overrideReferences": false,
+  "precompiledReferences": [],
+  "autoReferenced": true,
+  "defineConstraints": [
+    "NPCIFY_UGUI"
+  ],
+  "versionDefines": [
+    {
+      "name": "com.unity.ugui",
+      "expression": "1.0.0",
+      "define": "NPCIFY_UGUI"
+    }
+  ],
+  "noEngineReferences": false
+}

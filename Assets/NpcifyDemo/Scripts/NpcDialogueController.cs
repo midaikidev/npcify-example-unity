@@ -44,6 +44,7 @@ namespace NpcifyDemo
         private CancellationTokenSource _conversation;
         private string _pendingRetryMessage;
         private bool _ending;
+        private bool _replyFieldWasFocused;
 
         public NpcifyNpc ActiveNpc => _active;
         public NpcifyNpc NearbyNpc => _nearby;
@@ -109,6 +110,15 @@ namespace NpcifyDemo
             var option = _staging?.Options != null && index < _staging.Options.Count ? _staging.Options[index] : null;
             _ending = option != null && option.End;
             _ = SendReplyAsync(label);
+        }
+
+        /// <summary>Sends a typed reply, like the reply field (the NPC must allow custom replies).</summary>
+        public void SendCustomReply(string message)
+        {
+            if (!string.IsNullOrWhiteSpace(message))
+            {
+                _ = SendReplyAsync(message.Trim());
+            }
         }
 
         public void Close()
@@ -182,7 +192,14 @@ namespace NpcifyDemo
                 Close();
                 return;
             }
-            if (view.IsReplyFieldFocused)
+            var replyFieldFocused = view.IsReplyFieldFocused;
+            if (replyFieldFocused && !_replyFieldWasFocused)
+            {
+                // The player starts to type a reply.
+                _active.PrepareLiveMotion();
+            }
+            _replyFieldWasFocused = replyFieldFocused;
+            if (replyFieldFocused)
             {
                 return;
             }
@@ -226,6 +243,8 @@ namespace NpcifyDemo
                 var staging = await npc.BeginConversationAsync(token);
                 if (npc == _active && !token.IsCancellationRequested)
                 {
+                    // The player pressed the talk key: warm up live motion before the first reply.
+                    npc.PrepareLiveMotion();
                     EnterSpeaking(staging);
                 }
             }

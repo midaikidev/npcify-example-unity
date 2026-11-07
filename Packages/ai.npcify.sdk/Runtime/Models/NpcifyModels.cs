@@ -16,6 +16,16 @@ namespace Npcify.Sdk.Models
         public BakedConversationAsset BakedConversationAsset;
         public float Volume = 1f;
         public bool Muted;
+        /// <summary>
+        /// How the player can reply: Options, Text and Voice, in any combination; one mode
+        /// forces it. Null or empty: every mode that the character permits (docs/voice-input.md).
+        /// </summary>
+        public List<Npcify.Sdk.Speech.NpcifyInputMode> InputModes;
+        /// <summary>
+        /// Live motion (docs/realtime-motion.md): on by default. The SDK declares motion_frames only
+        /// when a rig can play it, so a character without such a rig keeps its prepared clips.
+        /// </summary>
+        public Npcify.Sdk.Motion.NpcifyLiveMotionOptions LiveMotion = new Npcify.Sdk.Motion.NpcifyLiveMotionOptions();
 
         public string ResolvedToken =>
             !string.IsNullOrWhiteSpace(ApiToken)
@@ -40,8 +50,12 @@ namespace Npcify.Sdk.Models
         public string Name;
         public string IdleAnimationId;
         public bool AllowCustomReply;
+        /// <summary>The owner turned voice input on (the STT tab).</summary>
+        public bool SpeechInputEnabled;
         public bool BakedConversationEnabled;
         public int BakedConversationRevision;
+        /// <summary>The character's body motion is generated live in each turn (false on older servers).</summary>
+        public bool RealtimeMotionEnabled;
     }
 
     [Serializable]
@@ -123,6 +137,10 @@ namespace Npcify.Sdk.Models
         public List<StagingDialogueBlock> Dialogue = new List<StagingDialogueBlock>();
         public List<StagingExpressionClip> Expressions = new List<StagingExpressionClip>();
         public List<StagingAnimationClip> Animations = new List<StagingAnimationClip>();
+        /// <summary>The motion prompts of a live motion turn (NPCP 1.1).</summary>
+        public List<Npcify.Sdk.Motion.StagingMotionPrompt> Motions = new List<Npcify.Sdk.Motion.StagingMotionPrompt>();
+        /// <summary>The stored live motion frames of a completed staging, or null (NPCP 1.1).</summary>
+        public Npcify.Sdk.Motion.StagingMotionTrack Motion;
     }
 
     [Serializable]
