@@ -43,6 +43,12 @@ namespace Npcify.Sdk.Unity
             _preparedClips[block] = clip;
         }
 
+        // The length of the decoded clip of a block: a block of a streamed reply plays to its end.
+        private double PreparedClipLength(StagingDialogueBlock block)
+        {
+            return block != null && _preparedClips.TryGetValue(block, out var clip) && clip != null ? clip.length : 0.0;
+        }
+
         // A staging that starts to play releases the clips of other stagings.
         private void ReleaseClipsOfOtherStagings(StagingResultPayload staging)
         {

@@ -426,6 +426,7 @@ namespace Npcify.Sdk.Unity
             _runtime = new NpcifyCharacterRuntime(options);
             _runtime.StagingPreparer = PrepareStagingAudioAsync;
             _runtime.BlockAudioPreparer = PrepareBlockAudioAsync;
+            _runtime.BlockAudioLength = PreparedClipLength;
             _runtime.Expressions.AutoBlinkEnabled = autoBlink;
             _runtime.OnSpeechStart += staging =>
             {

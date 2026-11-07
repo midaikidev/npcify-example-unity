@@ -593,6 +593,7 @@ namespace Npcify.Sdk.Character
 
         private void HandleDialogueBlockStarted(StagingDialogueBlock block)
         {
+            NoteBlockStart(block);
             if (block?.Audio?.Data != null && block.Audio.Data.Length > 0 && IsPcmAudio(block.Audio))
             {
                 var decoded = DecodeAudioBytes(block.Audio.Data);

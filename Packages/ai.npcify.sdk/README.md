@@ -33,14 +33,14 @@ Add the Npcify scoped registry and `ai.npcify.sdk` to `Packages/manifest.json`:
     }
   ],
   "dependencies": {
-    "ai.npcify.sdk": "0.6.0"
+    "ai.npcify.sdk": "0.6.1"
   }
 }
 ```
 
 ### Option 2: Download `.tgz` Tarball
 
-Download the latest UPM package tarball from `https://npcify.ai/sdk/unity/latest` (or a specific version from `https://npcify.ai/sdk/unity/app/0.6.0`), then in Unity open **Window > Package Manager > + > Install package from tarball...** and select the downloaded `ai.npcify.sdk-0.6.0.tgz` file.
+Download the latest UPM package tarball from `https://npcify.ai/sdk/unity/latest` (or a specific version from `https://npcify.ai/sdk/unity/app/0.6.1`), then in Unity open **Window > Package Manager > + > Install package from tarball...** and select the downloaded `ai.npcify.sdk-0.6.1.tgz` file.
 
 ## Quick Start (3D Game Integration)
 
@@ -124,9 +124,15 @@ a gap and without a repeated block.
   and the block can start. The last block can play while the server still
   aligns its lip-sync: later revisions add to its visemes and text timing. A
   block whose chunks did not arrive plays the stored audio of the HTTP result.
-- **Clock:** at the end of the ready blocks the reply waits with a neutral mouth
-  until the next block can play. The staging clock, and with it the live motion
-  frames, waits too.
+- **Clock:** a block plays to the later of two ends: the end of its timing and
+  the end of its decoded audio (the `AudioClip` length). While the server aligns
+  the last block, its estimated end can come before the end of its audio: the
+  staging clock, and with it the live motion frames, runs on with the voice. The
+  part without lip-sync has a neutral mouth until a later revision adds its
+  visemes and text timing at the current time. At the end of its audio, a block
+  that is not final waits for its final version. At the end of the ready blocks
+  the reply waits with a neutral mouth until the next block can play. The
+  staging clock and the live motion frames wait too.
 - **Events:** `OnSpeechStart` fires when the first block plays. `OnSpeechEnd`
   fires once, after the last block and when the reply options are known. The
   task of `SpeakAsync` or `ReplyAsync` completes with the HTTP result, after the
@@ -145,9 +151,11 @@ a gap and without a repeated block.
   turns streaming off. `NpcifyApiClient.TurnTimeout` (120 s) limits a turn
   request: the server answers after it aligned all the speech of the reply.
   `Runtime.OnStreamLog` reports when the first revision, the first audio and the
-  playback of each streamed reply came.
+  playback of each streamed reply came, and the audio length of a pending block.
 - **Own integrations:** a runtime with a `StagingPreparer` but no
   `BlockAudioPreparer` plays each reply after its HTTP result, as before. A host
+  that decodes the audio gives its length with `Runtime.BlockAudioLength`;
+  without it, the clock of a pending block waits at its estimated end. A host
   that plays the audio itself stops the voice of the current block on
   `Runtime.OnSpeechStopped` (the runtime stopped the reply: a failed turn, a
   turn that the server runs again, a newer reply).

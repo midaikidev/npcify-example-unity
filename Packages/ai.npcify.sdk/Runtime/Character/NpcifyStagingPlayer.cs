@@ -23,6 +23,8 @@ namespace Npcify.Sdk.Character
         private bool _isPlaying;
         // A streamed staging (PlayStream): its dialogue grows, and a block starts only when ready.
         private Func<int, bool> _isBlockReady;
+        // A streamed staging: the length in seconds of the decoded audio of a block (0: not known).
+        private Func<StagingDialogueBlock, double> _audioLength;
         private bool _dialogueComplete = true;
         // The block that the playback waits for (-1: none); the clock does not run meanwhile.
         private int _waitingBlockIndex = -1;
@@ -86,7 +88,7 @@ namespace Npcify.Sdk.Character
 
         public void Play(StagingResultPayload staging)
         {
-            Start(staging, null, true);
+            Start(staging, null, true, null);
         }
 
         /// <summary>
@@ -97,7 +99,23 @@ namespace Npcify.Sdk.Character
         /// </summary>
         public void PlayStream(StagingResultPayload staging, Func<int, bool> isBlockReady)
         {
-            Start(staging, isBlockReady ?? (_ => true), false);
+            PlayStream(staging, isBlockReady, null);
+        }
+
+        /// <summary>
+        /// Plays a streamed staging as <see cref="PlayStream(StagingResultPayload, Func{int, bool})"/>.
+        /// <paramref name="audioLength"/>(block) gives the length in seconds of the decoded audio of
+        /// a block, or 0 when it is not known. A block plays to the end of its audio: the clock of a
+        /// pending block runs on while later revisions add its alignment, and the next block starts
+        /// when the audio ended. Without a length, the clock waits at the estimated end of a pending
+        /// block until its final version.
+        /// </summary>
+        public void PlayStream(
+            StagingResultPayload staging,
+            Func<int, bool> isBlockReady,
+            Func<StagingDialogueBlock, double> audioLength)
+        {
+            Start(staging, isBlockReady ?? (_ => true), false, audioLength);
         }
 
         /// <summary>The streamed staging that plays has its complete dialogue now.</summary>
@@ -146,7 +164,11 @@ namespace Npcify.Sdk.Character
             }
         }
 
-        private void Start(StagingResultPayload staging, Func<int, bool> isBlockReady, bool dialogueComplete)
+        private void Start(
+            StagingResultPayload staging,
+            Func<int, bool> isBlockReady,
+            bool dialogueComplete,
+            Func<StagingDialogueBlock, double> audioLength)
         {
             if (staging == null)
             {
@@ -155,6 +177,7 @@ namespace Npcify.Sdk.Character
 
             _staging = staging;
             _isBlockReady = isBlockReady;
+            _audioLength = audioLength;
             _dialogueComplete = dialogueComplete;
             _waitingBlockIndex = -1;
             _playedExpressions.Clear();
@@ -233,17 +256,24 @@ namespace Npcify.Sdk.Character
             }
 
             var current = CurrentBlock;
-            if (current != null && current.Pending && _blockElapsedSeconds >= ComputeBlockDuration(current))
+            var step = dt;
+            if (current != null && current.Pending)
             {
-                // A pending block ends with its final version; until then the clock waits.
-                _visemePlayer.Clear();
-                _facialMixer.ClearVisemes();
-                _facialMixer.Update((float)dt);
-                return;
+                // A pending block ends with its final version. At the end of its audio (or, without
+                // an audio length, at its estimated end) the clock waits.
+                var end = BlockEnd(current);
+                if (_blockElapsedSeconds >= end)
+                {
+                    _visemePlayer.Clear();
+                    _facialMixer.ClearVisemes();
+                    _facialMixer.Update((float)dt);
+                    return;
+                }
+                step = Math.Min(dt, end - _blockElapsedSeconds);
             }
 
-            _timelineElapsedSeconds += dt;
-            _blockElapsedSeconds += dt;
+            _timelineElapsedSeconds += step;
+            _blockElapsedSeconds += step;
 
             EvaluateGlobalTracks(_timelineElapsedSeconds);
             EvaluateCurrentBlock(fallbackAudioRms);
@@ -296,8 +326,7 @@ namespace Npcify.Sdk.Character
             var visemeWeights = _visemePlayer.Evaluate(_blockElapsedSeconds, fallbackAudioRms);
             _facialMixer.SetVisemeWeights(visemeWeights);
 
-            var duration = ComputeBlockDuration(block);
-            if (_blockElapsedSeconds >= duration && !block.Pending)
+            if (_blockElapsedSeconds >= BlockEnd(block) && !block.Pending)
             {
                 if (_revealedBuilder.Length < (block.Text?.Length ?? 0))
                 {
@@ -436,6 +465,18 @@ namespace Npcify.Sdk.Character
                     }
                 }
             }
+        }
+
+        /// <summary>
+        /// The block time at which a block ends: the end of its timing, or of its decoded audio
+        /// when that is later. The estimated end of a pending block comes before the end of its
+        /// complete audio; the voice keeps playing, so the clock does too.
+        /// </summary>
+        private double BlockEnd(StagingDialogueBlock block)
+        {
+            var timed = ComputeBlockDuration(block);
+            var audio = _audioLength != null ? _audioLength(block) : 0.0;
+            return audio > timed && !double.IsInfinity(audio) ? audio : timed;
         }
 
         private static double ComputeBlockDuration(StagingDialogueBlock block)

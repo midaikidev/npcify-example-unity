@@ -434,7 +434,7 @@ namespace Npcify.Sdk.Character
             {
                 return;
             }
-            _stagingPlayer.PlayStream(turn.Payload, index => IsBlockReady(turn.Payload.Timeline.Dialogue, index));
+            _stagingPlayer.PlayStream(turn.Payload, index => IsBlockReady(turn.Payload.Timeline.Dialogue, index), AudioLengthOf);
             if (turn.Complete)
             {
                 _stagingPlayer.CompleteStream();
@@ -541,6 +541,7 @@ namespace Npcify.Sdk.Character
                 _blockPreparation.Dispose();
                 _blockPreparation = new CancellationTokenSource();
                 _blockAudio.Clear();
+                _blockAudioLength.Clear();
             }
         }
 
