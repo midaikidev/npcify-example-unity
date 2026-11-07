@@ -54,7 +54,11 @@ namespace Npcify.Sdk.Unity.UniVrm
         };
 
         private Vrm10Instance _vrm;
+        // The runtime whose animation this component wrapped; UniVRM can make a new one.
+        private Vrm10Runtime _runtime;
         private Vrm10RuntimeControlRig _controlRig;
+        // A control rig whose T-pose cannot drive live motion; it is not read again.
+        private Vrm10RuntimeControlRig _unusableControlRig;
         private Transform _rigRoot;
         private NpcifyLiveMotionRig _rig;
         private NpcifyLiveMotionPlayer _player;
@@ -108,10 +112,16 @@ namespace Npcify.Sdk.Unity.UniVrm
 
         private void OnDisable()
         {
-            // Give the game its animation back; never make the runtime here (the T-pose trap).
-            if (_controlRig != null && _vrm != null && ReferenceEquals(_vrm.Runtime.VrmAnimation, _animation))
+            Uninstall();
+        }
+
+        private void Uninstall()
+        {
+            // Give the game its animation back. Use the runtime that was wrapped: reading
+            // Vrm10Instance.Runtime would make a new one when UniVRM disposed it (the T-pose trap).
+            if (_runtime != null && ReferenceEquals(_runtime.VrmAnimation, _animation))
             {
-                _vrm.Runtime.VrmAnimation = _animation.Inner;
+                _runtime.VrmAnimation = _animation.Inner;
             }
         }
 
@@ -121,9 +131,14 @@ namespace Npcify.Sdk.Unity.UniVrm
             {
                 return;
             }
+            // Vrm10Instance reads Runtime in its own update right after this one, so reading it
+            // here makes no runtime earlier than UniVRM would.
             var runtime = _vrm.Runtime;
-            if (runtime.ControlRig == null)
+            var controlRig = runtime.ControlRig;
+            if (controlRig == null)
             {
+                _rig = null;
+                Uninstall();
                 if (!_warned)
                 {
                     _warned = true;
@@ -131,9 +146,24 @@ namespace Npcify.Sdk.Unity.UniVrm
                 }
                 return;
             }
-            if (_rig == null && !BuildRig(runtime.ControlRig))
+            if (!ReferenceEquals(controlRig, _controlRig) || _rigRoot == null)
             {
-                return;
+                // A new runtime (after Vrm10Instance.DisposeRuntime) has a new control rig: read its
+                // T-pose again, and never use the destroyed one.
+                _rig = null;
+                _controlRig = null;
+                _rigRoot = null;
+                if (ReferenceEquals(controlRig, _unusableControlRig) || !BuildRig(controlRig))
+                {
+                    _unusableControlRig = controlRig;
+                    Uninstall();
+                    return;
+                }
+            }
+            if (!ReferenceEquals(runtime, _runtime))
+            {
+                _runtime = runtime;
+                _animation.Inner = null;
             }
             if (!ReferenceEquals(runtime.VrmAnimation, _animation))
             {
@@ -254,6 +284,10 @@ namespace Npcify.Sdk.Unity.UniVrm
             private Vector3 BaseHips()
             {
                 var controlRig = _owner._controlRig;
+                if (controlRig == null || _owner._rigRoot == null)
+                {
+                    return Inner != null ? Inner.ControlRig.Item1.GetRawHipsPosition() : Vector3.zero;
+                }
                 var sinkHips = ((ITPoseProvider)controlRig).GetWorldTransform(HumanBodyBones.Hips).Value.Translation;
                 if (Inner != null)
                 {
@@ -276,7 +310,7 @@ namespace Npcify.Sdk.Unity.UniVrm
                 var player = _owner._player;
                 var rig = _owner._rig;
                 _live.Clear();
-                _weight = player != null && rig != null && player.HasPose ? (float)player.Weight : 0f;
+                _weight = player != null && rig != null && _owner._rigRoot != null && player.HasPose ? (float)player.Weight : 0f;
                 if (_weight <= 0)
                 {
                     return;

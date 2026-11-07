@@ -122,6 +122,10 @@ namespace Npcify.Sdk.Api
         private Task<Connection> _connecting;
         private string _desiredConversationId;
         private string _joinedConversationId;
+        // The last join of this conversation failed; the stream reconnects in the background.
+        private string _failedConversationId;
+        // The server refused this conversation (for example a rotated key): no retry for it.
+        private string _refusedConversationId;
         private bool _disposed;
         private bool _reconnecting;
 
@@ -156,6 +160,28 @@ namespace Npcify.Sdk.Api
             }
         }
 
+        /// <summary>The last join of this conversation failed and no join succeeded since.</summary>
+        public bool IsFailing(string conversationId)
+        {
+            lock (_gate)
+            {
+                return conversationId != null && _failedConversationId == conversationId &&
+                       !(_joinedConversationId == conversationId && _connection != null && !_connection.Closed);
+            }
+        }
+
+        /// <summary>
+        /// The server refused this conversation, for example after the API key was rotated. The
+        /// stream does not try it again; a new conversation or a new stream can.
+        /// </summary>
+        public bool IsRefused(string conversationId)
+        {
+            lock (_gate)
+            {
+                return conversationId != null && _refusedConversationId == conversationId;
+            }
+        }
+
         /// <summary>The Socket.IO URL of an API base URL (its origin; the path is not used).</summary>
         public static Uri BuildUri(string baseUrl)
         {
@@ -177,7 +203,7 @@ namespace Npcify.Sdk.Api
             }
             lock (_gate)
             {
-                if (_disposed)
+                if (_disposed || _refusedConversationId == conversationId)
                 {
                     return false;
                 }
@@ -189,30 +215,31 @@ namespace Npcify.Sdk.Api
             }
             try
             {
-                var connection = await ConnectAsync(cancellationToken).ConfigureAwait(false);
-                if (connection == null)
+                var connection = await ConnectAsync(conversationId, cancellationToken).ConfigureAwait(false);
+                if (connection != null)
                 {
-                    return false;
-                }
-                var reply = await RequestAsync(
-                    connection,
-                    "conversations:join",
-                    "{\"conversationId\":" + NpcifySocketIo.JsonString(conversationId) + "}",
-                    cancellationToken).ConfigureAwait(false);
-                if (reply == null || !NpcifySocketIo.ReadTrue(reply, "ok"))
-                {
-                    Log?.Invoke("The conversation stream refused the join.");
-                    return false;
-                }
-                lock (_gate)
-                {
-                    if (_desiredConversationId != conversationId || connection.Closed)
+                    var reply = await RequestAsync(
+                        connection,
+                        "conversations:join",
+                        "{\"conversationId\":" + NpcifySocketIo.JsonString(conversationId) + "}",
+                        cancellationToken).ConfigureAwait(false);
+                    if (reply != null && NpcifySocketIo.ReadTrue(reply, "ok"))
                     {
-                        return false;
+                        lock (_gate)
+                        {
+                            if (_desiredConversationId == conversationId && !connection.Closed)
+                            {
+                                _joinedConversationId = conversationId;
+                                _failedConversationId = null;
+                                return true;
+                            }
+                        }
                     }
-                    _joinedConversationId = conversationId;
+                    else
+                    {
+                        Log?.Invoke("The conversation stream did not join the conversation.");
+                    }
                 }
-                return true;
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -221,8 +248,39 @@ namespace Npcify.Sdk.Api
             catch (Exception error)
             {
                 Log?.Invoke("The conversation stream failed: " + error.Message);
-                return false;
             }
+            JoinFailed(conversationId);
+            return false;
+        }
+
+        private void JoinFailed(string conversationId)
+        {
+            lock (_gate)
+            {
+                if (_disposed || _refusedConversationId == conversationId || _desiredConversationId != conversationId)
+                {
+                    return;
+                }
+                _failedConversationId = conversationId;
+            }
+            // Turns stop waiting for this conversation; the stream tries again in the background.
+            ScheduleReconnect(null, true);
+        }
+
+        // The receive thread marks a refusal at once, before the join that waits for it fails.
+        private void MarkRefused()
+        {
+            lock (_gate)
+            {
+                if (_desiredConversationId == null)
+                {
+                    return;
+                }
+                _refusedConversationId = _desiredConversationId;
+                _desiredConversationId = null;
+                _joinedConversationId = null;
+            }
+            Log?.Invoke("The conversation stream refused the conversation; no retry for it.");
         }
 
         /// <summary>Leaves the current conversation; the connection stays open for the next one.</summary>
@@ -235,6 +293,9 @@ namespace Npcify.Sdk.Api
                 left = _joinedConversationId ?? _desiredConversationId;
                 _desiredConversationId = null;
                 _joinedConversationId = null;
+                _failedConversationId = null;
+                // An explicit leave also allows a refused conversation to try again.
+                _refusedConversationId = null;
                 connection = _connection;
             }
             if (left != null && connection != null && !connection.Closed)
@@ -266,10 +327,15 @@ namespace Npcify.Sdk.Api
             }
         }
 
-        private Task<Connection> ConnectAsync(CancellationToken cancellationToken)
+        private Task<Connection> ConnectAsync(string conversationId, CancellationToken cancellationToken)
         {
             lock (_gate)
             {
+                if (_refusedConversationId == conversationId || _desiredConversationId != conversationId)
+                {
+                    // Refused or replaced while this join started: no connection for it.
+                    return Task.FromResult<Connection>(null);
+                }
                 if (_connection != null && !_connection.Closed)
                 {
                     return Task.FromResult(_connection);
@@ -329,6 +395,11 @@ namespace Npcify.Sdk.Api
             }
             try
             {
+                if (connection.Closed)
+                {
+                    // Closed before the request: no answer can come.
+                    return null;
+                }
                 await SendAsync(connection, NpcifySocketIo.Event(eventName, json, ackId), cancellationToken).ConfigureAwait(false);
                 return await WithTimeout(reply.Task, TimeSpan.FromMilliseconds(TimeoutMs), cancellationToken).ConfigureAwait(false);
             }
@@ -444,12 +515,20 @@ namespace Npcify.Sdk.Api
                 case 4:
                     Log?.Invoke("The conversation stream refused the connection: " +
                                 (NpcifySocketIo.ReadStringField(packet.Json, "message") ?? "no reason"));
+                    MarkRefused();
                     connection.Connected.TrySetResult(false);
                     return false;
                 case 2:
                     if (NpcifySocketIo.ReadEventName(packet.Json) == "exception")
                     {
                         Log?.Invoke("The conversation stream reported: " + packet.Json);
+                        // The server refuses the join of a conversation that the key cannot read
+                        // and disconnects: retrying fails the same way.
+                        if (packet.Json.IndexOf("CONVERSATION_ACCESS_DENIED", StringComparison.Ordinal) >= 0)
+                        {
+                            MarkRefused();
+                            return false;
+                        }
                     }
                     return true;
                 case 5:
@@ -575,13 +654,15 @@ namespace Npcify.Sdk.Api
             }
         }
 
-        private void ScheduleReconnect(Connection connection)
+        private void ScheduleReconnect(Connection connection, bool afterFailedJoin = false)
         {
             string conversationId;
             lock (_gate)
             {
+                // A lost connection reconnects unless a newer one exists; a failed join tries again
+                // also on an open connection that did not join.
                 if (_disposed || _reconnecting || _desiredConversationId == null ||
-                    (_connection != null && _connection != connection))
+                    (!afterFailedJoin && _connection != null && _connection != connection))
                 {
                     return;
                 }

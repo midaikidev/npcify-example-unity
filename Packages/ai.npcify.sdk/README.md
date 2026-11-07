@@ -191,8 +191,14 @@ clips.
   `LiveMotionTarget`; `NpcifyLiveMotionRig` maps the frames onto your rig from
   its T-pose positions.
 - **Transport:** the frames come on the conversation stream (Socket.IO over a
-  WebSocket, `System.Net.WebSockets.ClientWebSocket`). WebGL builds have no
-  `ClientWebSocket`, so they keep the prepared clips.
+  WebSocket, `System.Net.WebSockets.ClientWebSocket`). A turn declares the
+  frames only when the stream has joined the conversation, and waits for the
+  join for `Runtime.TurnJoinWaitMilliseconds` (3000) at most. After that time,
+  or at once while the stream fails, the turn plays the prepared clips and the
+  stream connects again in the background. The SDK does not try again a
+  conversation that the server refuses (for example after you rotate the API
+  key). WebGL builds have no `ClientWebSocket`, so they keep the prepared
+  clips.
 
 ## Spatial Voice
 

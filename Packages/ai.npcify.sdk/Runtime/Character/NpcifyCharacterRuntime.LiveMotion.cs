@@ -45,6 +45,50 @@ namespace Npcify.Sdk.Character
         private IReadOnlyList<string> LiveMotionCapabilities =>
             WantsLiveMotion ? new[] { NpcifyMotionFrames.Capability } : null;
 
+        /// <summary>The longest time in milliseconds that a turn waits for the stream to join.</summary>
+        public int TurnJoinWaitMilliseconds { get; set; } = 3000;
+
+        // A turn stopped waiting for the stream of this conversation; later turns do not wait for it.
+        private string _liveMotionJoinGivenUp;
+
+        /// <summary>
+        /// The capabilities of a turn. Live motion frames arrive on the conversation stream while the
+        /// server makes the turn, so a turn declares them only when the stream has joined. A turn
+        /// waits a few seconds for the join at most and does not wait for a join that is known to
+        /// fail: it then gets the prepared clips, while the stream tries again in the background.
+        /// </summary>
+        private async Task<IReadOnlyList<string>> ResolveTurnCapabilitiesAsync(
+            string conversationId,
+            CancellationToken cancellationToken)
+        {
+            if (!WantsLiveMotion)
+            {
+                return Array.Empty<string>();
+            }
+            if (_stream != null && _stream.IsJoined(conversationId))
+            {
+                return LiveMotionCapabilities;
+            }
+            if (_liveMotionJoinGivenUp == conversationId ||
+                (_stream != null && (_stream.IsFailing(conversationId) || _stream.IsRefused(conversationId))))
+            {
+                return Array.Empty<string>();
+            }
+            var join = JoinLiveMotionStreamAsync(conversationId, CancellationToken.None);
+            using (var wait = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
+            {
+                var finished = await Task.WhenAny(join, Task.Delay(Math.Max(0, TurnJoinWaitMilliseconds), wait.Token));
+                wait.Cancel();
+                cancellationToken.ThrowIfCancellationRequested();
+                if (finished == join && join.Result)
+                {
+                    return LiveMotionCapabilities;
+                }
+            }
+            _liveMotionJoinGivenUp = conversationId;
+            return Array.Empty<string>();
+        }
+
         /// <summary>
         /// Warms up live motion for the current conversation, once, on the player's intent: call it
         /// when the player starts to type a reply or presses to talk, before the message. It does
@@ -58,11 +102,15 @@ namespace Npcify.Sdk.Character
             {
                 return false;
             }
+            if (_stream != null && (_stream.IsRefused(conversationId) || _stream.IsFailing(conversationId)))
+            {
+                // The frames could not reach this client: a warm-up would cost the owner for nothing.
+                return false;
+            }
             _liveMotionPrepared = conversationId;
-            var joined = JoinLiveMotionStreamAsync(conversationId, cancellationToken);
-            var warming = await _api.WarmUpLiveMotionAsync(conversationId, cancellationToken);
-            await joined;
-            return warming;
+            // The stream joins in the background; the warm-up does not wait for it.
+            _ = JoinLiveMotionStreamAsync(conversationId, CancellationToken.None);
+            return await _api.WarmUpLiveMotionAsync(conversationId, cancellationToken);
         }
 
         private async Task<bool> JoinLiveMotionStreamAsync(string conversationId, CancellationToken cancellationToken)

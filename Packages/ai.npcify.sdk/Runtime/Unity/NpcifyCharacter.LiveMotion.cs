@@ -43,7 +43,13 @@ namespace Npcify.Sdk.Unity
         }
 
         /// <summary>True while turns ask for live motion: it is on and the rig can play it.</summary>
-        public bool LiveMotionReady => liveMotion && _liveMotionTarget != null && _liveMotionTarget.IsReady;
+        public bool LiveMotionReady => liveMotion && IsAlive(_liveMotionTarget) && _liveMotionTarget.IsReady;
+
+        // A destroyed Unity object is not null for an interface reference: test it as an Object.
+        private static bool IsAlive(INpcifyLiveMotionTarget target)
+        {
+            return target != null && !(target is UnityEngine.Object unityObject && unityObject == null);
+        }
 
         /// <summary>
         /// Warms up live motion for the current conversation on the player's intent. Call it when the
@@ -80,7 +86,7 @@ namespace Npcify.Sdk.Unity
 
         private void FindLiveMotionTarget()
         {
-            if (_liveMotionTargetFromGame && _liveMotionTarget != null)
+            if (_liveMotionTargetFromGame && IsAlive(_liveMotionTarget))
             {
                 return;
             }
@@ -98,6 +104,12 @@ namespace Npcify.Sdk.Unity
 
         private void UpdateLiveMotionTarget()
         {
+            if (_liveMotionTarget != null && !IsAlive(_liveMotionTarget))
+            {
+                // The model was destroyed: no live motion until RefreshAvatarBindings finds a new one.
+                _liveMotionTarget = null;
+                _liveMotionTargetFromGame = false;
+            }
             _runtime.LiveMotionTargetReady = LiveMotionReady;
         }
 

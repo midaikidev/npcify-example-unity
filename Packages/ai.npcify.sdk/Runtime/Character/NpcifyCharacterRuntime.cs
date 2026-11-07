@@ -402,12 +402,8 @@ namespace Npcify.Sdk.Character
                     _activeStagingId = createdConv.OpeningStaging?.StagingId;
                 }
 
-                // Live motion frames arrive on the conversation stream while the server makes the
-                // turn: declare them only when the stream has joined the conversation. Always send
-                // the list: without it the server uses the capabilities of the conversation.
-                var capabilities = WantsLiveMotion && await JoinLiveMotionStreamAsync(_conversationId, cancellationToken)
-                    ? LiveMotionCapabilities
-                    : Array.Empty<string>();
+                // Always send the list: without it the server uses the capabilities of the conversation.
+                var capabilities = await ResolveTurnCapabilitiesAsync(_conversationId, cancellationToken);
                 var staging = await _api.CreateStagingAsync(
                     _conversationId,
                     message,
@@ -452,6 +448,7 @@ namespace Npcify.Sdk.Character
             StopSpeaking();
             _stream?.Leave();
             _liveMotionPrepared = null;
+            _liveMotionJoinGivenUp = null;
             _activeStagingId = null;
             _conversationId = _bakedConversation != null ? "baked:" + _bakedConversation.Asset.AvatarId : null;
         }
