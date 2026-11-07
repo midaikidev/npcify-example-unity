@@ -26,6 +26,9 @@ namespace NpcifyDemo
         private float _maxHandAboveShoulder = float.NegativeInfinity;
         private float _maxLeftHandAboveShoulder = float.NegativeInfinity;
         private float _maxLiveWeight;
+        // The online reply: the lag of its staging clock behind its voice.
+        private DemoClockProbe _clockProbe;
+        private string _clockProbeTag;
 
         private void Awake()
         {
@@ -97,6 +100,11 @@ namespace NpcifyDemo
                 _maxHandAboveShoulder = float.NegativeInfinity;
                 _maxLeftHandAboveShoulder = float.NegativeInfinity;
                 _maxLiveWeight = 0f;
+                if (npc.Mode == NpcConnectionMode.OnlineApi)
+                {
+                    _clockProbeTag = tag;
+                    _clockProbe = new DemoClockProbe();
+                }
                 yield return new WaitForSeconds(0.5f);
                 if (npc.Mode == NpcConnectionMode.OfflineBaked)
                 {
@@ -112,6 +120,8 @@ namespace NpcifyDemo
                     yield return Capture($"{step++:00}-{tag}-reply-motion");
                 }
                 yield return WaitFor(() => _controller.IsChoosing, 90f, $"{tag} reply");
+                _clockProbe?.Finish(note => Log($"{tag} {note}"));
+                _clockProbe = null;
                 yield return Capture($"{step++:00}-{tag}-reply");
                 runtime.OnMotionFrames -= LogFrames;
                 LogLiveMotion(tag, npc);
@@ -151,6 +161,7 @@ namespace NpcifyDemo
                 return;
             }
             _maxLiveWeight = Mathf.Max(_maxLiveWeight, (float)character.LiveMotion.Weight);
+            _clockProbe?.Sample(character.Runtime, character.AudioSource, note => Log($"{_clockProbeTag} {note}"));
             var hand = character.GetBone(HumanBodyBones.RightHand);
             var shoulder = character.GetBone(HumanBodyBones.RightUpperArm);
             if (hand != null && shoulder != null)
