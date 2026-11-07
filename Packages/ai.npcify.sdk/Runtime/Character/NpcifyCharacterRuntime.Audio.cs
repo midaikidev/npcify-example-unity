@@ -44,15 +44,7 @@ namespace Npcify.Sdk.Character
                 };
             }
 
-            if (bytes.Length >= 44 &&
-                bytes[0] == (byte)'R' &&
-                bytes[1] == (byte)'I' &&
-                bytes[2] == (byte)'F' &&
-                bytes[3] == (byte)'F' &&
-                bytes[8] == (byte)'W' &&
-                bytes[9] == (byte)'A' &&
-                bytes[10] == (byte)'V' &&
-                bytes[11] == (byte)'E')
+            if (IsWavBytes(bytes))
             {
                 return DecodeWavBytes(bytes, defaultSampleRate, defaultChannels);
             }
@@ -64,14 +56,66 @@ namespace Npcify.Sdk.Character
             );
         }
 
-        private static NpcifyDecodedAudio DecodeWavBytes(byte[] bytes, int fallbackRate, int fallbackChannels)
+        /// <summary>
+        /// The length in seconds of the bytes that <see cref="DecodeAudioBytes"/> decodes, read from
+        /// the WAV header (raw PCM: 16-bit samples at the default rate and channels), without a
+        /// decode. 0 when the bytes hold no samples.
+        /// </summary>
+        public static double PcmDurationSeconds(byte[] bytes, int defaultSampleRate = 24000, int defaultChannels = 1)
         {
-            var audioFormat = 1;
-            var channels = fallbackChannels > 0 ? fallbackChannels : 1;
-            var sampleRate = fallbackRate > 0 ? fallbackRate : 24000;
-            var bitsPerSample = 16;
-            var dataOffset = -1;
-            var dataSize = 0;
+            if (bytes == null || bytes.Length == 0)
+            {
+                return 0.0;
+            }
+            var rate = defaultSampleRate > 0 ? defaultSampleRate : 24000;
+            var channels = defaultChannels > 0 ? defaultChannels : 1;
+            if (!IsWavBytes(bytes))
+            {
+                return bytes.Length / 2 / (double)(rate * channels);
+            }
+            var header = ReadWavHeader(bytes, rate, channels);
+            var bytesPerSample = header.Format == 3 && header.BitsPerSample == 32 ? 4 : header.BitsPerSample == 16 ? 2 : 0;
+            if (header.DataOffset < 0 || header.DataSize <= 0 || bytesPerSample == 0 || header.SampleRate <= 0)
+            {
+                return 0.0;
+            }
+            return header.DataSize / bytesPerSample / (double)(header.SampleRate * header.Channels);
+        }
+
+        private static bool IsWavBytes(byte[] bytes)
+        {
+            return bytes.Length >= 44 &&
+                   bytes[0] == (byte)'R' &&
+                   bytes[1] == (byte)'I' &&
+                   bytes[2] == (byte)'F' &&
+                   bytes[3] == (byte)'F' &&
+                   bytes[8] == (byte)'W' &&
+                   bytes[9] == (byte)'A' &&
+                   bytes[10] == (byte)'V' &&
+                   bytes[11] == (byte)'E';
+        }
+
+        private struct WavHeader
+        {
+            public int Format;
+            public int Channels;
+            public int SampleRate;
+            public int BitsPerSample;
+            public int DataOffset;
+            public int DataSize;
+        }
+
+        private static WavHeader ReadWavHeader(byte[] bytes, int fallbackRate, int fallbackChannels)
+        {
+            var header = new WavHeader
+            {
+                Format = 1,
+                Channels = fallbackChannels > 0 ? fallbackChannels : 1,
+                SampleRate = fallbackRate > 0 ? fallbackRate : 24000,
+                BitsPerSample = 16,
+                DataOffset = -1,
+                DataSize = 0,
+            };
 
             var offset = 12;
             while (offset + 8 <= bytes.Length)
@@ -91,24 +135,36 @@ namespace Npcify.Sdk.Character
 
                 if (chunkId == "fmt " && chunkSize >= 16)
                 {
-                    audioFormat = bytes[offset] | (bytes[offset + 1] << 8);
-                    channels = Math.Max(1, bytes[offset + 2] | (bytes[offset + 3] << 8));
-                    sampleRate =
+                    header.Format = bytes[offset] | (bytes[offset + 1] << 8);
+                    header.Channels = Math.Max(1, bytes[offset + 2] | (bytes[offset + 3] << 8));
+                    header.SampleRate =
                         bytes[offset + 4] |
                         (bytes[offset + 5] << 8) |
                         (bytes[offset + 6] << 16) |
                         (bytes[offset + 7] << 24);
-                    bitsPerSample = bytes[offset + 14] | (bytes[offset + 15] << 8);
+                    header.BitsPerSample = bytes[offset + 14] | (bytes[offset + 15] << 8);
                 }
                 else if (chunkId == "data")
                 {
-                    dataOffset = offset;
-                    dataSize = chunkSize;
+                    header.DataOffset = offset;
+                    header.DataSize = chunkSize;
                     break;
                 }
 
                 offset += chunkSize + (chunkSize & 1);
             }
+            return header;
+        }
+
+        private static NpcifyDecodedAudio DecodeWavBytes(byte[] bytes, int fallbackRate, int fallbackChannels)
+        {
+            var header = ReadWavHeader(bytes, fallbackRate, fallbackChannels);
+            var audioFormat = header.Format;
+            var channels = header.Channels;
+            var sampleRate = header.SampleRate;
+            var bitsPerSample = header.BitsPerSample;
+            var dataOffset = header.DataOffset;
+            var dataSize = header.DataSize;
 
             if (dataOffset < 0 || dataSize <= 0)
             {

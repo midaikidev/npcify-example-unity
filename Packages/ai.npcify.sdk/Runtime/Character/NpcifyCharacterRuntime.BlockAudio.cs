@@ -27,11 +27,12 @@ namespace Npcify.Sdk.Character
 
         /// <summary>
         /// Optional hook that gives the length in seconds of the prepared audio of a dialogue block
-        /// of a streamed reply, or 0 when it is not known (docs/streaming_reply.md). A block plays
-        /// to the end of its audio: the clock of a pending block runs on while later revisions add
-        /// its alignment, and the next block starts when the audio ended. Without a length, the
+        /// of a streamed reply, or 0 when it is not known (docs/streaming_reply.md). A pending block
+        /// plays to the end of its audio: its clock runs on while later revisions add its
+        /// alignment, and its final version ends it at the end of its timing. Without a length, the
         /// clock waits at the estimated end of a pending block until its final version. The runtime
-        /// calls it on the thread that calls Tick. NpcifyCharacter sets it (AudioClip.length).
+        /// asks once per block, on the thread that calls Tick, and measures WAV and PCM audio
+        /// itself. NpcifyCharacter sets it (AudioClip.length).
         /// </summary>
         public Func<StagingDialogueBlock, double> BlockAudioLength { get; set; }
 
@@ -106,19 +107,20 @@ namespace Npcify.Sdk.Character
                 catch (Exception error)
                 {
                     // Without a length the block plays to the end of its timing, as before 0.6.1.
-                    _blockAudioLength[block] = 0.0;
+                    length = 0.0;
                     _mainThreadWork.Enqueue(() => OnError?.Invoke(error));
-                    return 0.0;
                 }
             }
             if (!(length > 0.0) && IsPcmAudio(block.Audio))
             {
-                length = DecodeAudioBytes(block.Audio.Data).DurationSeconds;
+                // The runtime plays PCM audio itself: its header gives the length.
+                length = PcmDurationSeconds(block.Audio.Data);
             }
             if (!(length > 0.0) || double.IsInfinity(length))
             {
-                return 0.0;
+                length = 0.0;
             }
+            // The audio of a block that can play is prepared: its length does not change any more.
             _blockAudioLength[block] = length;
             return length;
         }

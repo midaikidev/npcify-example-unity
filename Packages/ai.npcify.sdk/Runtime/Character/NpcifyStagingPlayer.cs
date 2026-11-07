@@ -105,10 +105,11 @@ namespace Npcify.Sdk.Character
         /// <summary>
         /// Plays a streamed staging as <see cref="PlayStream(StagingResultPayload, Func{int, bool})"/>.
         /// <paramref name="audioLength"/>(block) gives the length in seconds of the decoded audio of
-        /// a block, or 0 when it is not known. A block plays to the end of its audio: the clock of a
-        /// pending block runs on while later revisions add its alignment, and the next block starts
-        /// when the audio ended. Without a length, the clock waits at the estimated end of a pending
-        /// block until its final version.
+        /// a block, or 0 when it is not known. A pending block plays to the end of its audio: its
+        /// clock runs on while later revisions add its alignment. Its final version ends it at the
+        /// end of its timing; when the clock passed that time, the block ends at once, without a
+        /// jump back. Without a length, the clock waits at the estimated end of a pending block
+        /// until its final version.
         /// </summary>
         public void PlayStream(
             StagingResultPayload staging,
@@ -468,13 +469,19 @@ namespace Npcify.Sdk.Character
         }
 
         /// <summary>
-        /// The block time at which a block ends: the end of its timing, or of its decoded audio
-        /// when that is later. The estimated end of a pending block comes before the end of its
-        /// complete audio; the voice keeps playing, so the clock does too.
+        /// The block time at which a block ends. The estimated end of a pending block comes before
+        /// the end of its complete audio; the voice keeps playing, so the clock does too: a pending
+        /// block ends at the end of its timing or of its decoded audio, when that is later. A final
+        /// block ends at the end of its timing: the server timeline continues there, and a decoder
+        /// can add samples to the audio.
         /// </summary>
         private double BlockEnd(StagingDialogueBlock block)
         {
             var timed = ComputeBlockDuration(block);
+            if (!block.Pending)
+            {
+                return timed;
+            }
             var audio = _audioLength != null ? _audioLength(block) : 0.0;
             return audio > timed && !double.IsInfinity(audio) ? audio : timed;
         }

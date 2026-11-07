@@ -124,14 +124,15 @@ a gap and without a repeated block.
   and the block can start. The last block can play while the server still
   aligns its lip-sync: later revisions add to its visemes and text timing. A
   block whose chunks did not arrive plays the stored audio of the HTTP result.
-- **Clock:** a block plays to the later of two ends: the end of its timing and
-  the end of its decoded audio (the `AudioClip` length). While the server aligns
-  the last block, its estimated end can come before the end of its audio: the
-  staging clock, and with it the live motion frames, runs on with the voice. The
-  part without lip-sync has a neutral mouth until a later revision adds its
-  visemes and text timing at the current time. At the end of its audio, a block
-  that is not final waits for its final version. At the end of the ready blocks
-  the reply waits with a neutral mouth until the next block can play. The
+- **Clock:** while the server aligns the last block, its estimated end can come
+  before the end of its audio. The block then plays to the end of its decoded
+  audio (the `AudioClip` length): the staging clock, and with it the live motion
+  frames, runs on with the voice. The part without lip-sync has a neutral mouth
+  until a later revision adds its visemes and text timing at the current time.
+  At the end of its audio, a block that is not final waits for its final
+  version, which ends it at its end time; when the clock already passed that
+  time, the block ends at once, without a jump back. At the end of the ready
+  blocks the reply waits with a neutral mouth until the next block can play. The
   staging clock and the live motion frames wait too.
 - **Events:** `OnSpeechStart` fires when the first block plays. `OnSpeechEnd`
   fires once, after the last block and when the reply options are known. The
@@ -154,8 +155,9 @@ a gap and without a repeated block.
   playback of each streamed reply came, and the audio length of a pending block.
 - **Own integrations:** a runtime with a `StagingPreparer` but no
   `BlockAudioPreparer` plays each reply after its HTTP result, as before. A host
-  that decodes the audio gives its length with `Runtime.BlockAudioLength`;
-  without it, the clock of a pending block waits at its estimated end. A host
+  that decodes the audio gives its length with `Runtime.BlockAudioLength`; the
+  runtime measures WAV and PCM audio itself. Without a length, the clock of a
+  pending block waits at its estimated end. A host
   that plays the audio itself stops the voice of the current block on
   `Runtime.OnSpeechStopped` (the runtime stopped the reply: a failed turn, a
   turn that the server runs again, a newer reply).
