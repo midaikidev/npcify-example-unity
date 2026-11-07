@@ -267,20 +267,24 @@ namespace Npcify.Sdk.Api
             ScheduleReconnect(null, true);
         }
 
-        // The receive thread marks a refusal at once, before the join that waits for it fails.
-        private void MarkRefused()
+        // The receive thread marks a refusal at once, before the join that waits for it fails. A
+        // refusal names its conversation (cause.data.conversationId): one that is no longer wanted
+        // (the game started another conversation while the server looked it up) changes nothing.
+        // A refusal without a name refuses the conversation that is wanted. True when it marked one.
+        private bool MarkRefused(string conversationId)
         {
             lock (_gate)
             {
-                if (_desiredConversationId == null)
+                if (_desiredConversationId == null || (conversationId != null && conversationId != _desiredConversationId))
                 {
-                    return;
+                    return false;
                 }
                 _refusedConversationId = _desiredConversationId;
                 _desiredConversationId = null;
                 _joinedConversationId = null;
             }
             Log?.Invoke("The conversation stream refused the conversation; no retry for it.");
+            return true;
         }
 
         /// <summary>Leaves the current conversation; the connection stays open for the next one.</summary>
@@ -515,7 +519,7 @@ namespace Npcify.Sdk.Api
                 case 4:
                     Log?.Invoke("The conversation stream refused the connection: " +
                                 (NpcifySocketIo.ReadStringField(packet.Json, "message") ?? "no reason"));
-                    MarkRefused();
+                    MarkRefused(null);
                     connection.Connected.TrySetResult(false);
                     return false;
                 case 2:
@@ -523,10 +527,12 @@ namespace Npcify.Sdk.Api
                     {
                         Log?.Invoke("The conversation stream reported: " + packet.Json);
                         // The server refuses the join of a conversation that the key cannot read
-                        // and disconnects: retrying fails the same way.
-                        if (packet.Json.IndexOf("CONVERSATION_ACCESS_DENIED", StringComparison.Ordinal) >= 0)
+                        // and disconnects: retrying fails the same way. The refusal of a conversation
+                        // that is no longer wanted does not stop the wanted one: after the disconnect
+                        // the stream connects again and joins it.
+                        if (packet.Json.IndexOf("CONVERSATION_ACCESS_DENIED", StringComparison.Ordinal) >= 0 &&
+                            MarkRefused(NpcifySocketIo.ReadCauseConversationId(packet.Json)))
                         {
-                            MarkRefused();
                             return false;
                         }
                     }

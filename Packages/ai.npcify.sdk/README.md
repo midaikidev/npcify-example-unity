@@ -254,7 +254,9 @@ clips.
   attempts while the runtime lives. When the server refuses the conversation
   (for example after you rotate the API key), the stream stops its attempts for
   that conversation, and the turns keep the prepared clips until the next
-  conversation (`ResetConversation` or another conversation ID). WebGL builds
+  conversation (`ResetConversation` or another conversation ID). The refusal of
+  a conversation that you left while the server checked it does not stop the
+  next conversation. WebGL builds
   have no `ClientWebSocket`, so they keep the prepared clips.
 
 ## Spatial Voice

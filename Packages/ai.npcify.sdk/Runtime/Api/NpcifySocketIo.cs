@@ -141,6 +141,23 @@ namespace Npcify.Sdk.Api
             return index >= 0 && index < json.Length && json[index] == '"' ? ReadString(json, ref index) : null;
         }
 
+        /// <summary>
+        /// The conversation that an exception event names: cause.data.conversationId of a refused
+        /// conversations:join, or null when the event names none.
+        /// </summary>
+        public static string ReadCauseConversationId(string json)
+        {
+            var cause = FindValue(json, "cause");
+            if (cause < 0)
+            {
+                return null;
+            }
+            var causeJson = json.Substring(cause);
+            var data = FindValue(causeJson, "data");
+            var id = data < 0 ? null : ReadStringField(causeJson.Substring(data), "conversationId");
+            return string.IsNullOrEmpty(id) ? null : id;
+        }
+
         /// <summary>True when a JSON object has the field with the literal true.</summary>
         public static bool ReadTrue(string json, string key)
         {
