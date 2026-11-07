@@ -17,7 +17,10 @@ namespace Npcify.Sdk.Character
         Audio,
         Final,
         Failed,
-        /// <summary>A second start event: the server runs the turn again (a retried request).</summary>
+        /// <summary>
+        /// The server runs the turn again (a retried request): a second start event, or after a
+        /// retry a revision that starts the dialogue again. The event belongs to the new run.
+        /// </summary>
         Restarted,
     }
 
@@ -43,28 +46,22 @@ namespace Npcify.Sdk.Character
     /// timeline revisions of conversations:stream, the MP3 chunks of each speech block, the reply
     /// options, and the reconciliation with the HTTP result. A revision only adds dialogue, and
     /// only the last (pending) speech block can grow; a revision that changes published dialogue
-    /// fails the turn. The runtime calls it on the thread that calls Tick.
+    /// fails the turn, unless the request was sent again (then it starts a rerun). The runtime
+    /// calls it under its playback lock.
     /// </summary>
-    internal sealed class NpcifyStreamTurn
+    internal sealed partial class NpcifyStreamTurn
     {
         public const string ChangedDialogueMessage = "A staging revision changed published dialogue.";
 
-        private sealed class AudioStream
-        {
-            public readonly List<byte[]> Chunks = new List<byte[]>();
-            public long NextIndex;
-            public bool Broken;
-            public byte[] Bytes;
-        }
-
         private static long _nextSequence;
         private readonly System.Diagnostics.Stopwatch _clock = System.Diagnostics.Stopwatch.StartNew();
-        private readonly Dictionary<string, AudioStream> _audio = new Dictionary<string, AudioStream>(StringComparer.Ordinal);
         private TaskCompletionSource<bool> _started =
             new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         private long _revision;
-        // A start event arrived: a later one means that the server runs the turn again.
+        // An event of the turn arrived: a later start event means that the server runs it again.
         private bool _runStarted;
+        // The request was sent again: the server can run the turn again.
+        private bool _rerunExpected;
 
         public NpcifyStreamTurn(string taskId)
         {
@@ -88,8 +85,11 @@ namespace Npcify.Sdk.Character
         /// <summary>Seconds since the turn request, for the notes of the stream.</summary>
         public double ElapsedSeconds => _clock.Elapsed.TotalSeconds;
 
-        /// <summary>The staging that plays: revisions add to it, and the HTTP result completes it.</summary>
-        public StagingResultPayload Payload { get; }
+        /// <summary>
+        /// The staging that plays: revisions add to it, and the HTTP result completes it. A rerun
+        /// gets a new object.
+        /// </summary>
+        public StagingResultPayload Payload { get; private set; }
 
         /// <summary>A timeline revision arrived: the stream plays this reply, not the HTTP result.</summary>
         public bool HasTimeline { get; private set; }
@@ -113,7 +113,10 @@ namespace Npcify.Sdk.Character
         /// <summary>The HTTP request of the turn finished (a result or a failure).</summary>
         public bool RequestClosed { get; set; }
 
-        /// <summary>The playback ended before the options were known; OnSpeechEnd waits for them.</summary>
+        /// <summary>
+        /// The playback ended before the options were known; OnSpeechEnd waits for them. A stop
+        /// keeps it, so that the runtime can raise the end.
+        /// </summary>
         public bool EndPending { get; set; }
 
         /// <summary>Milestones already in the notes of the stream: 1 the first revision, 2 the first audio.</summary>
@@ -122,6 +125,20 @@ namespace Npcify.Sdk.Character
         /// <summary>True when the playback starts, false when it never will.</summary>
         public Task<bool> Started => _started.Task;
 
+        // A rerun can still come: the request was sent again and did not finish.
+        private bool RerunPossible => _rerunExpected && !RequestClosed;
+
+        /// <summary>
+        /// The request of the turn is sent again: the server can run the turn again, and the start
+        /// event of the rerun can be lost while the stream connects again. Until the request
+        /// finishes, a revision whose number is not higher than the last one, or one that does not
+        /// continue the published dialogue, starts the rerun too.
+        /// </summary>
+        public void ExpectRerun()
+        {
+            _rerunExpected = true;
+        }
+
         public NpcifyStreamChange Apply(Dictionary<string, object> streamEvent)
         {
             if (streamEvent == null)
@@ -129,23 +146,33 @@ namespace Npcify.Sdk.Character
                 return NpcifyStreamChange.None;
             }
             var type = GetString(streamEvent, "type");
-            var rerun = type == "start" && _runStarted;
+            var started = _runStarted;
             // Each run of the turn sends its start event first.
             _runStarted = true;
-            if (rerun && !IsFinalStop(StopReason))
-            {
-                // A retried request runs the turn again under the same task ID.
-                return NpcifyStreamChange.Restarted;
-            }
-            if (Stopped)
+            if (IsFinalStop(StopReason))
             {
                 return NpcifyStreamChange.None;
             }
+            if (type == "start")
+            {
+                if (started)
+                {
+                    // A retried request runs the turn again under the same task ID.
+                    return NpcifyStreamChange.Restarted;
+                }
+                if (!Stopped)
+                {
+                    AdoptStagingId(streamEvent);
+                }
+                return NpcifyStreamChange.None;
+            }
+            if (Stopped)
+            {
+                // A failed or refused turn: only a rerun of a retried request can start it again.
+                return RerunPossible ? ApplyWhileFailed(type, streamEvent) : NpcifyStreamChange.None;
+            }
             switch (type)
             {
-                case "start":
-                    AdoptStagingId(streamEvent);
-                    return NpcifyStreamChange.None;
                 case "speech_chunk":
                     AppendChunk(streamEvent);
                     return NpcifyStreamChange.None;
@@ -220,25 +247,6 @@ namespace Npcify.Sdk.Character
             return true;
         }
 
-        /// <summary>The block can play: a pause, silent speech, or speech whose audio arrived completely.</summary>
-        public static bool HasPlayableAudio(StagingDialogueBlock block)
-        {
-            if (block == null || block.Type != "speech")
-            {
-                return true;
-            }
-            var audio = block.Audio;
-            if (audio == null || audio.Type == "silent")
-            {
-                return true;
-            }
-            if (audio.Type == "stream")
-            {
-                return false;
-            }
-            return (audio.Data != null && audio.Data.Length > 0) || !string.IsNullOrWhiteSpace(audio.Url);
-        }
-
         /// <summary>All blocks are known and can play: the stream delivered the whole reply.</summary>
         public bool AllBlocksPlayable
         {
@@ -267,7 +275,6 @@ namespace Npcify.Sdk.Character
             {
                 StopReason = reason;
             }
-            EndPending = false;
             _started.TrySetResult(PlaybackStarted);
         }
 
@@ -278,13 +285,15 @@ namespace Npcify.Sdk.Character
 
         /// <summary>
         /// The server runs the turn again (a retried request): the turn forgets the first run and
-        /// applies the new run from its start event, in the same staging object.
+        /// applies the new run from <paramref name="firstEvent"/> on, in a new staging object (the
+        /// game got the first one with OnSpeechStart).
         /// </summary>
-        public void Restart(Dictionary<string, object> startEvent)
+        public void Restart(Dictionary<string, object> firstEvent)
         {
-            _audio.Clear();
+            ForgetAudioOf(Payload.Timeline.Dialogue);
             _revision = 0;
             _runStarted = true;
+            _rerunExpected = false;
             HasTimeline = false;
             Complete = false;
             HasFinal = false;
@@ -296,14 +305,10 @@ namespace Npcify.Sdk.Character
             {
                 _started = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
             }
-            Payload.TaskId = TaskId;
-            Payload.StagingId = string.Empty;
-            Payload.Text = string.Empty;
-            Payload.Options = new List<StagingReplyOption>();
-            Payload.Timeline = new StagingTimeline();
-            if (startEvent != null)
+            Payload = new StagingResultPayload { ProtocolVersion = 1, TaskId = TaskId };
+            if (firstEvent != null)
             {
-                AdoptStagingId(startEvent);
+                AdoptStagingId(firstEvent);
             }
         }
 
@@ -316,115 +321,63 @@ namespace Npcify.Sdk.Character
             }
         }
 
-        private void AppendChunk(Dictionary<string, object> streamEvent)
+        // A failed or refused turn while its request is sent again: the audio of the rerun can
+        // come before its first revision, and a revision that starts over shows the rerun.
+        private NpcifyStreamChange ApplyWhileFailed(string type, Dictionary<string, object> streamEvent)
         {
-            var streamId = GetString(streamEvent, "streamId");
-            if (string.IsNullOrEmpty(streamId))
+            switch (type)
             {
-                return;
-            }
-            var audio = GetAudio(streamId);
-            if (audio.Bytes != null || audio.Broken)
-            {
-                return;
-            }
-            var index = GetLong(streamEvent, "chunkIndex", -1);
-            var data = GetBytes(streamEvent, "data");
-            if (index != audio.NextIndex || data == null)
-            {
-                // A missed chunk: this speech plays the stored audio of the HTTP result.
-                BreakAudio(streamId);
-                return;
-            }
-            audio.Chunks.Add(data);
-            audio.NextIndex++;
-        }
-
-        private NpcifyStreamChange CompleteAudio(string streamId)
-        {
-            if (string.IsNullOrEmpty(streamId))
-            {
-                return NpcifyStreamChange.None;
-            }
-            var audio = GetAudio(streamId);
-            if (audio.Bytes != null || audio.Broken || audio.Chunks.Count == 0)
-            {
-                return NpcifyStreamChange.None;
-            }
-            var length = 0;
-            foreach (var chunk in audio.Chunks)
-            {
-                length += chunk.Length;
-            }
-            var bytes = new byte[length];
-            var offset = 0;
-            foreach (var chunk in audio.Chunks)
-            {
-                Buffer.BlockCopy(chunk, 0, bytes, offset, chunk.Length);
-                offset += chunk.Length;
-            }
-            audio.Chunks.Clear();
-            audio.Bytes = bytes;
-            var changed = false;
-            foreach (var block in Payload.Timeline.Dialogue)
-            {
-                changed |= AttachAudio(block);
-            }
-            return changed ? NpcifyStreamChange.Audio : NpcifyStreamChange.None;
-        }
-
-        private void BreakAudio(string streamId)
-        {
-            if (string.IsNullOrEmpty(streamId))
-            {
-                return;
-            }
-            var audio = GetAudio(streamId);
-            if (audio.Bytes == null)
-            {
-                audio.Broken = true;
-                audio.Chunks.Clear();
+                case "speech_chunk":
+                    AppendChunk(streamEvent);
+                    return NpcifyStreamChange.None;
+                case "speech_complete":
+                    CompleteAudio(GetString(streamEvent, "streamId"));
+                    return NpcifyStreamChange.None;
+                case "speech_error":
+                    BreakAudio(GetString(streamEvent, "streamId"));
+                    return NpcifyStreamChange.None;
+                case "staging_live":
+                case "staging_prefix":
+                case "staging":
+                    var timeline = ReadTimeline(streamEvent);
+                    return timeline != null && StartsRerun(GetLong(streamEvent, "revision", 0), timeline)
+                        ? NpcifyStreamChange.Restarted
+                        : NpcifyStreamChange.None;
+                default:
+                    return NpcifyStreamChange.None;
             }
         }
 
-        private AudioStream GetAudio(string streamId)
+        private static StagingTimeline ReadTimeline(Dictionary<string, object> streamEvent)
         {
-            if (!_audio.TryGetValue(streamId, out var audio))
-            {
-                audio = new AudioStream();
-                _audio[streamId] = audio;
-            }
-            return audio;
+            return streamEvent.TryGetValue("timeline", out var value) && value is Dictionary<string, object> map
+                ? NpcifySchemaMapper.MapTimeline(map)
+                : null;
         }
 
-        // A stream block whose chunks are complete gets them as MP3 bytes.
-        private bool AttachAudio(StagingDialogueBlock block)
+        // A revision of a rerun: its numbers start at 1 again, and its dialogue starts over.
+        private bool StartsRerun(long revision, StagingTimeline timeline)
         {
-            var audio = block?.Audio;
-            if (audio == null || audio.Type != "stream" || string.IsNullOrEmpty(audio.StreamId) ||
-                !_audio.TryGetValue(audio.StreamId, out var stream) || stream.Bytes == null)
-            {
-                return false;
-            }
-            audio.Type = "bytes";
-            audio.Data = stream.Bytes;
-            audio.MimeType = string.IsNullOrEmpty(audio.MimeType) ? "audio/mpeg" : audio.MimeType;
-            return true;
+            return revision <= _revision || !Continues(timeline);
         }
 
         private NpcifyStreamChange ApplyRevision(Dictionary<string, object> streamEvent, bool complete)
         {
-            if (Complete)
+            var timeline = ReadTimeline(streamEvent);
+            if (timeline == null)
             {
                 return NpcifyStreamChange.None;
             }
             var revision = GetLong(streamEvent, "revision", 0);
-            if (revision <= _revision ||
-                !(streamEvent.TryGetValue("timeline", out var value) && value is Dictionary<string, object> timelineMap))
+            if (RerunPossible && StartsRerun(revision, timeline))
+            {
+                return NpcifyStreamChange.Restarted;
+            }
+            if (Complete || revision <= _revision)
             {
                 return NpcifyStreamChange.None;
             }
-            Merge(NpcifySchemaMapper.MapTimeline(timelineMap));
+            Merge(timeline);
             var dialogue = Payload.Timeline.Dialogue;
             if (!HasFinal)
             {
@@ -482,37 +435,50 @@ namespace Npcify.Sdk.Character
         }
 
         /// <summary>
+        /// True when the timeline keeps the published dialogue: the same blocks, of which only a
+        /// pending speech block can grow.
+        /// </summary>
+        private bool Continues(StagingTimeline next)
+        {
+            var dialogue = Payload.Timeline.Dialogue;
+            var blocks = next.Dialogue ?? new List<StagingDialogueBlock>();
+            if (blocks.Count < dialogue.Count)
+            {
+                return false;
+            }
+            for (var index = 0; index < dialogue.Count; index++)
+            {
+                var a = dialogue[index];
+                var b = blocks[index];
+                if (b == null || a.Id != b.Id || a.Type != b.Type || a.Text != b.Text || Math.Abs(a.StartTime - b.StartTime) > 1e-6)
+                {
+                    return false;
+                }
+                var valid = a.Pending && a.Type == "speech"
+                    ? !b.Pending || b.EndTime >= a.EndTime - 1e-6
+                    : Math.Abs(a.EndTime - b.EndTime) <= 1e-6;
+                if (!valid)
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        /// <summary>
         /// Adds the new blocks of a revision or of the result. A published block stays as it is,
         /// except a pending speech block: it keeps its ID, text and start, and takes the end,
         /// timing and lip-sync of its next version (its end grows while it stays pending).
         /// </summary>
         private void Merge(StagingTimeline next)
         {
-            var dialogue = Payload.Timeline.Dialogue;
-            var blocks = next.Dialogue ?? new List<StagingDialogueBlock>();
-            var valid = blocks.Count >= dialogue.Count;
-            for (var index = 0; valid && index < dialogue.Count; index++)
-            {
-                var a = dialogue[index];
-                var b = blocks[index];
-                if (b == null || a.Id != b.Id || a.Type != b.Type || a.Text != b.Text || Math.Abs(a.StartTime - b.StartTime) > 1e-6)
-                {
-                    valid = false;
-                }
-                else if (a.Pending && a.Type == "speech")
-                {
-                    valid = !b.Pending || b.EndTime >= a.EndTime - 1e-6;
-                }
-                else
-                {
-                    valid = Math.Abs(a.EndTime - b.EndTime) <= 1e-6;
-                }
-            }
-            if (!valid)
+            if (!Continues(next))
             {
                 Stop(NpcifyTurnStop.Rejected);
                 throw new InvalidDataException(ChangedDialogueMessage);
             }
+            var dialogue = Payload.Timeline.Dialogue;
+            var blocks = next.Dialogue ?? new List<StagingDialogueBlock>();
             for (var index = 0; index < dialogue.Count; index++)
             {
                 var block = dialogue[index];
@@ -570,30 +536,6 @@ namespace Npcify.Sdk.Character
                 return integer;
             }
             return value is double number ? (long)number : fallback;
-        }
-
-        private static byte[] GetBytes(Dictionary<string, object> map, string key)
-        {
-            if (!map.TryGetValue(key, out var value))
-            {
-                return null;
-            }
-            if (value is byte[] bytes)
-            {
-                return bytes;
-            }
-            if (value is string base64)
-            {
-                try
-                {
-                    return Convert.FromBase64String(base64);
-                }
-                catch (FormatException)
-                {
-                    return null;
-                }
-            }
-            return null;
         }
     }
 }

@@ -69,10 +69,17 @@ namespace Npcify.Sdk.Character
             _stagingPlayer.OnAnimationClipTriggered += clip =>
                 PlayAnimation(clip.Animation, clip.Loop);
             _stagingPlayer.OnStagingCompleted += HandleStagingCompleted;
+            _api.OnStagingRetry += HandleStagingRetry;
         }
 
         public event Action<StagingResultPayload> OnSpeechStart;
         public event Action<StagingResultPayload> OnSpeechEnd;
+        /// <summary>
+        /// The speech that played stopped before its end: StopSpeaking, a new conversation, a
+        /// staging or a newer reply that replaces it, a failed turn, or a turn that the server runs
+        /// again. Stop the audio of the current block here.
+        /// </summary>
+        public event Action OnSpeechStopped;
         public event Action<StagingDialogueBlock, NpcifyDecodedAudio> OnAudioBlock;
         public event Action<string, StagingCharacterCue> OnCharacterRevealed;
         public event Action<string, bool> OnAnimationPlayRequested;
@@ -430,13 +437,26 @@ namespace Npcify.Sdk.Character
         /// <summary>Forgets the active live or baked conversation. The next call starts a new one.</summary>
         public void ResetConversation()
         {
-            StopSpeaking();
+            StoppedSpeech stop;
+            lock (_playbackGate)
+            {
+                _playGeneration++;
+                _thinking = false;
+                // A reply that played to its end and waits for its options still ends.
+                stop = StopPlayingTurn(NpcifyTurnStop.Game);
+                stop.Stopped |= StopPlayback();
+            }
             StopStreamTurns();
             _stream?.Leave();
             _liveMotionPrepared = null;
             _streamJoinGivenUp = null;
             _activeStagingId = null;
             _conversationId = _bakedConversation != null ? "baked:" + _bakedConversation.Asset.AvatarId : null;
+            lock (_playbackGate)
+            {
+                // The events come last: a handler can start the next conversation.
+                Report(stop);
+            }
         }
 
         public void PlayStaging(StagingResultPayload staging)
@@ -448,11 +468,19 @@ namespace Npcify.Sdk.Character
 
             lock (_playbackGate)
             {
-                // A staging played as a whole replaces a streamed reply.
-                StopPlayingTurn(NpcifyTurnStop.Superseded);
+                var generation = ++_playGeneration;
                 _thinking = false;
+                // A staging played as a whole replaces the speech that plays.
+                var stop = StopPlayingTurn(NpcifyTurnStop.Superseded);
+                stop.Stopped |= StopPlayback();
                 _activeStagingId = staging.StagingId;
                 LoadStoredMotion(staging);
+                Report(stop);
+                if (generation != _playGeneration)
+                {
+                    // A handler of the stop played or stopped speech.
+                    return;
+                }
                 OnSpeechStart?.Invoke(staging);
                 _stagingPlayer.Play(staging);
             }
@@ -488,10 +516,12 @@ namespace Npcify.Sdk.Character
         {
             lock (_playbackGate)
             {
+                _playGeneration++;
                 _thinking = false;
                 // A reply that played to its end and waits for its options still ends.
-                StopPlayingTurn(NpcifyTurnStop.Game);
-                _stagingPlayer.Stop();
+                var stop = StopPlayingTurn(NpcifyTurnStop.Game);
+                stop.Stopped |= StopPlayback();
+                Report(stop);
             }
         }
 
@@ -553,6 +583,7 @@ namespace Npcify.Sdk.Character
 
         public void Dispose()
         {
+            _api.OnStagingRetry -= HandleStagingRetry;
             StopStreamTurns();
             _stream?.Dispose();
             _api.Dispose();

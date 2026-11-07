@@ -433,6 +433,7 @@ namespace Npcify.Sdk.Unity
                 OnSpeechStart?.Invoke(staging);
             };
             _runtime.OnSpeechEnd += staging => OnSpeechEnd?.Invoke(staging);
+            _runtime.OnSpeechStopped += StopVoice;
             _runtime.OnCharacterRevealed += (text, cue) => OnCharacterRevealed?.Invoke(text, cue);
             _runtime.OnAudioBlock += HandleAudioBlock;
             _runtime.OnAnimationPlayRequested += HandleAnimationPlayRequested;
@@ -503,6 +504,15 @@ namespace Npcify.Sdk.Unity
             catch (Exception ex)
             {
                 OnError?.Invoke(ex);
+            }
+        }
+
+        // The runtime stopped the speech (a failed turn, a rerun, a newer reply): its voice stops too.
+        private void StopVoice()
+        {
+            if (audioSourceComponent != null && audioSourceComponent.isPlaying)
+            {
+                audioSourceComponent.Stop();
             }
         }
 

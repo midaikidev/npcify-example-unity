@@ -147,7 +147,10 @@ a gap and without a repeated block.
   `Runtime.OnStreamLog` reports when the first revision, the first audio and the
   playback of each streamed reply came.
 - **Own integrations:** a runtime with a `StagingPreparer` but no
-  `BlockAudioPreparer` plays each reply after its HTTP result, as before.
+  `BlockAudioPreparer` plays each reply after its HTTP result, as before. A host
+  that plays the audio itself stops the voice of the current block on
+  `Runtime.OnSpeechStopped` (the runtime stopped the reply: a failed turn, a
+  turn that the server runs again, a newer reply).
 
 ## Voice Input
 

@@ -20,6 +20,8 @@ namespace Npcify.Sdk.Character
         private NpcifyStreamTurn _playingTurn;
         // The request order of the newest reply that started to play: an older reply never plays over it.
         private long _playedSequence;
+        // Counts the calls that start or stop speech: a handler of a stop can make one.
+        private long _playGeneration;
 
         /// <summary>
         /// True when replies play while they stream: NpcifyOptions.StreamPlayback is on, the
@@ -180,9 +182,15 @@ namespace Npcify.Sdk.Character
         // The HTTP path: the result plays as a whole, unless a newer reply plays already.
         private async Task PlayTurnResultAsync(StagingResultPayload staging, long sequence, CancellationToken cancellationToken)
         {
-            if (Volatile.Read(ref _playedSequence) > sequence)
+            lock (_playbackGate)
             {
-                return;
+                if (_playedSequence > sequence)
+                {
+                    return;
+                }
+                // Older replies do not start while the audio of this one is prepared.
+                _playedSequence = sequence;
+                SupersedeOlderTurns(sequence);
             }
             var preparer = StagingPreparer;
             if (preparer != null)
@@ -192,12 +200,11 @@ namespace Npcify.Sdk.Character
             cancellationToken.ThrowIfCancellationRequested();
             lock (_playbackGate)
             {
+                // A newer reply started while the audio was prepared.
                 if (_playedSequence > sequence)
                 {
                     return;
                 }
-                _playedSequence = sequence;
-                SupersedeOlderTurns(sequence);
                 PlayStaging(staging);
             }
         }
@@ -224,6 +231,21 @@ namespace Npcify.Sdk.Character
             }
         }
 
+        // The API client sends a turn request again: the server can run the turn again.
+        private void HandleStagingRetry(string requestId)
+        {
+            var taskId = (requestId ?? string.Empty).Trim().ToLowerInvariant();
+            lock (_playbackGate)
+            {
+                var turn = FindTurn(taskId);
+                if (turn != null)
+                {
+                    turn.ExpectRerun();
+                    Note(turn, "the request is sent again");
+                }
+            }
+        }
+
         // Socket thread: the event is applied on the thread that calls Tick.
         private void EnqueueTurnEvent(Dictionary<string, object> streamEvent)
         {
@@ -246,25 +268,22 @@ namespace Npcify.Sdk.Character
                 {
                     return;
                 }
-                NpcifyStreamChange change;
-                try
+                var change = ApplyTurnEvent(turn, streamEvent);
+                if (change == NpcifyStreamChange.Restarted)
                 {
-                    change = turn.Apply(streamEvent);
-                }
-                catch (Exception)
-                {
-                    // A revision that changes published dialogue: the reply stops, nothing replays.
-                    // The request reports the failure (or its result does not match either).
-                    Note(turn, "a revision changed published dialogue");
-                    EndTurn(turn, NpcifyTurnStop.Rejected);
-                    return;
+                    RestartTurn(turn, streamEvent);
+                    var type = streamEvent.TryGetValue("type", out var name) ? name as string : null;
+                    if (type == "start" || turn.Stopped)
+                    {
+                        return;
+                    }
+                    // The revision that showed the rerun belongs to it: apply it from zero.
+                    change = ApplyTurnEvent(turn, streamEvent);
                 }
                 switch (change)
                 {
                     case NpcifyStreamChange.None:
-                        return;
                     case NpcifyStreamChange.Restarted:
-                        RestartTurn(turn, streamEvent);
                         return;
                     case NpcifyStreamChange.Failed:
                         // The HTTP request fails too and reports the error.
@@ -276,6 +295,22 @@ namespace Npcify.Sdk.Character
                         PumpTurn(turn);
                         return;
                 }
+            }
+        }
+
+        // A revision that changes published dialogue stops the reply and changes nothing; the
+        // request reports the failure (its result fails too).
+        private NpcifyStreamChange ApplyTurnEvent(NpcifyStreamTurn turn, Dictionary<string, object> streamEvent)
+        {
+            try
+            {
+                return turn.Apply(streamEvent);
+            }
+            catch (Exception)
+            {
+                Note(turn, "a revision changed published dialogue");
+                EndTurn(turn, NpcifyTurnStop.Rejected);
+                return NpcifyStreamChange.None;
             }
         }
 
@@ -292,7 +327,7 @@ namespace Npcify.Sdk.Character
         }
 
         // A retried request: the server runs the turn again under the same task ID.
-        private void RestartTurn(NpcifyStreamTurn turn, Dictionary<string, object> startEvent)
+        private void RestartTurn(NpcifyStreamTurn turn, Dictionary<string, object> firstEvent)
         {
             if (turn.Sequence < _playedSequence)
             {
@@ -300,15 +335,18 @@ namespace Npcify.Sdk.Character
                 turn.Stop(NpcifyTurnStop.Superseded);
                 return;
             }
+            var stop = default(StoppedSpeech);
             if (_playingTurn == turn)
             {
-                // The first run stops without OnSpeechEnd; the new run plays from its start.
+                // The first run stops; if it played to its end, it ends before the rerun starts.
                 _playingTurn = null;
-                _stagingPlayer.Stop();
+                stop.Ended = turn.EndPending ? turn.Payload : null;
+                stop.Stopped = StopPlayback();
             }
-            turn.Restart(startEvent);
+            turn.Restart(firstEvent);
             _thinking = true;
             Note(turn, "the server runs the turn again");
+            Report(stop);
         }
 
         // Prepares the audio of ready blocks, starts the playback once the first block can play,
@@ -353,16 +391,24 @@ namespace Npcify.Sdk.Character
 
         private void StartStreamPlayback(NpcifyStreamTurn turn)
         {
-            StopPlayingTurn(NpcifyTurnStop.Superseded);
+            _playGeneration++;
+            _thinking = false;
+            var stop = StopPlayingTurn(NpcifyTurnStop.Superseded);
+            stop.Stopped |= StopPlayback();
             SupersedeOlderTurns(turn.Sequence);
             _playingTurn = turn;
             _playedSequence = turn.Sequence;
             turn.MarkStarted();
             ForgetBlocksOutside(turn.Payload.Timeline.Dialogue);
-            _thinking = false;
             _activeStagingId = turn.Payload.StagingId;
             Note(turn, "the streamed reply plays (" + turn.Payload.Timeline.Dialogue.Count + " block(s) published)");
             LoadStoredMotion(turn.Payload);
+            // The reply that this one replaces ends first; its handlers can stop this one.
+            Report(stop);
+            if (_playingTurn != turn)
+            {
+                return;
+            }
             OnSpeechStart?.Invoke(turn.Payload);
             if (_playingTurn != turn)
             {
@@ -389,39 +435,65 @@ namespace Npcify.Sdk.Character
             ForgetClosedTurns();
         }
 
-        // The playing reply stops. If it already played to its end and only waited for its
-        // options, its OnSpeechEnd fires now: the game heard the whole reply.
-        private void StopPlayingTurn(NpcifyTurnStop reason)
+        // What a stop leaves to report once the state of the runtime is consistent.
+        private struct StoppedSpeech
+        {
+            // The staging player stopped speech that played: the host stops its audio.
+            public bool Stopped;
+            // A reply that played to its end before its options came: its OnSpeechEnd.
+            public StagingResultPayload Ended;
+        }
+
+        // The playing reply stops; the caller reports the stop when its own state is consistent.
+        private StoppedSpeech StopPlayingTurn(NpcifyTurnStop reason)
         {
             var turn = _playingTurn;
             if (turn == null)
             {
-                return;
+                return default;
             }
             _playingTurn = null;
-            var ended = turn.EndPending;
+            var stop = new StoppedSpeech { Ended = turn.EndPending ? turn.Payload : null };
+            turn.EndPending = false;
             turn.Stop(reason);
-            _stagingPlayer.Stop();
+            stop.Stopped = StopPlayback();
             ForgetClosedTurns();
-            if (ended)
+            return stop;
+        }
+
+        // Stops the staging player; true when it played or waited for a block.
+        private bool StopPlayback()
+        {
+            var playing = _stagingPlayer.IsPlaying;
+            _stagingPlayer.Stop();
+            return playing;
+        }
+
+        // The host stops its audio, then a reply that played to its end gets its OnSpeechEnd. The
+        // handlers can start or stop speech: callers report last.
+        private void Report(StoppedSpeech stop)
+        {
+            if (stop.Stopped)
             {
-                OnSpeechEnd?.Invoke(turn.Payload);
+                OnSpeechStopped?.Invoke();
+            }
+            if (stop.Ended != null)
+            {
+                OnSpeechEnd?.Invoke(stop.Ended);
             }
         }
 
         // The turn plays no more; a reply that played to its end still gets its OnSpeechEnd.
         private void EndTurn(NpcifyStreamTurn turn, NpcifyTurnStop reason)
         {
-            if (_playingTurn == turn)
-            {
-                StopPlayingTurn(reason);
-                _thinking = false;
-            }
-            else
+            if (_playingTurn != turn)
             {
                 turn.Stop(reason);
+                ForgetClosedTurns();
+                return;
             }
-            ForgetClosedTurns();
+            _thinking = false;
+            Report(StopPlayingTurn(reason));
         }
 
         // A turn stays findable while its request is open: a retry can run it again, and its result

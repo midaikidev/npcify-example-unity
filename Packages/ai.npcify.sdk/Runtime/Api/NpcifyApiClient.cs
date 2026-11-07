@@ -71,6 +71,13 @@ namespace Npcify.Sdk.Api
         /// </summary>
         public TimeSpan TurnTimeout { get; set; } = TimeSpan.FromSeconds(120);
 
+        /// <summary>
+        /// Raised before a turn request (CreateStagingAsync) is sent again, with its
+        /// Idempotency-Key: the server can then run the turn again under the same task ID
+        /// (docs/streaming_reply.md). Raised on the thread of the request.
+        /// </summary>
+        public event Action<string> OnStagingRetry;
+
         public string BaseUrl =>
             string.IsNullOrWhiteSpace(_options.BaseUrl)
                 ? "https://api.npcify.ai"
@@ -271,6 +278,10 @@ namespace Npcify.Sdk.Api
             for (var attempt = 0; attempt < totalAttempts; attempt++)
             {
                 var delayMs = retryDelaysMs[attempt];
+                if (attempt > 0)
+                {
+                    OnStagingRetry?.Invoke(idempotencyKey);
+                }
                 if (delayMs > 0)
                 {
                     await Task.Delay(delayMs, cancellationToken).ConfigureAwait(false);
