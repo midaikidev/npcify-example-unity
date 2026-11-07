@@ -399,6 +399,9 @@ namespace Npcify.Sdk.Character
                 return bakedReply.Payload;
             }
 
+            // The character thinks until the reply of its newest request plays or fails.
+            var sequence = NpcifyStreamTurn.NextSequence();
+            Volatile.Write(ref _newestRequest, sequence);
             _thinking = true;
             try
             {
@@ -409,13 +412,19 @@ namespace Npcify.Sdk.Character
                     _activeStagingId = createdConv.OpeningStaging?.StagingId;
                 }
 
-                var staging = await RequestTurnAsync(message, cancellationToken);
-                _thinking = false;
+                var staging = await RequestTurnAsync(message, sequence, cancellationToken);
+                if (IsNewestRequest(sequence))
+                {
+                    _thinking = false;
+                }
                 return staging;
             }
             catch (Exception ex)
             {
-                _thinking = false;
+                if (IsNewestRequest(sequence))
+                {
+                    _thinking = false;
+                }
                 OnError?.Invoke(ex);
                 throw;
             }
@@ -461,6 +470,12 @@ namespace Npcify.Sdk.Character
 
         public void PlayStaging(StagingResultPayload staging)
         {
+            PlayStaging(staging, true);
+        }
+
+        // endsThinking: false for the result of an older request while a newer one is in flight.
+        private void PlayStaging(StagingResultPayload staging, bool endsThinking)
+        {
             if (staging == null)
             {
                 throw new ArgumentNullException(nameof(staging));
@@ -469,7 +484,10 @@ namespace Npcify.Sdk.Character
             lock (_playbackGate)
             {
                 var generation = ++_playGeneration;
-                _thinking = false;
+                if (endsThinking)
+                {
+                    _thinking = false;
+                }
                 // A staging played as a whole replaces the speech that plays.
                 var stop = StopPlayingTurn(NpcifyTurnStop.Superseded);
                 stop.Stopped |= StopPlayback();
@@ -482,6 +500,11 @@ namespace Npcify.Sdk.Character
                     return;
                 }
                 OnSpeechStart?.Invoke(staging);
+                if (generation != _playGeneration)
+                {
+                    // A handler of the start played or stopped speech.
+                    return;
+                }
                 _stagingPlayer.Play(staging);
             }
         }

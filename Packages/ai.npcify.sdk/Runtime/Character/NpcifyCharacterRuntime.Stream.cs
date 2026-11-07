@@ -22,6 +22,8 @@ namespace Npcify.Sdk.Character
         private long _playedSequence;
         // Counts the calls that start or stop speech: a handler of a stop can make one.
         private long _playGeneration;
+        // The request order of the newest turn request: the character thinks until its reply plays.
+        private long _newestRequest;
 
         /// <summary>
         /// True when replies play while they stream: NpcifyOptions.StreamPlayback is on, the
@@ -56,14 +58,13 @@ namespace Npcify.Sdk.Character
         }
 
         /// <summary>Requests a turn; the reply plays from the stream, or from the HTTP result.</summary>
-        private async Task<StagingResultPayload> RequestTurnAsync(string message, CancellationToken cancellationToken)
+        private async Task<StagingResultPayload> RequestTurnAsync(string message, long sequence, CancellationToken cancellationToken)
         {
             var conversationId = _conversationId;
             // The server uses the Idempotency-Key as the task ID of the stream events.
             var requestId = Guid.NewGuid().ToString("D");
             var stream = await ResolveTurnStreamAsync(conversationId, cancellationToken);
-            var turn = stream.Joined && StreamPlaybackEnabled ? OpenTurn(requestId) : null;
-            var sequence = turn?.Sequence ?? NpcifyStreamTurn.NextSequence();
+            var turn = stream.Joined && StreamPlaybackEnabled ? OpenTurn(requestId, sequence) : null;
             StagingResultPayload staging;
             try
             {
@@ -127,9 +128,15 @@ namespace Npcify.Sdk.Character
             }
         }
 
-        private NpcifyStreamTurn OpenTurn(string requestId)
+        // Thinking belongs to the newest request: an older reply that plays or fails does not end it.
+        private bool IsNewestRequest(long sequence)
         {
-            var turn = new NpcifyStreamTurn(requestId);
+            return sequence >= Volatile.Read(ref _newestRequest);
+        }
+
+        private NpcifyStreamTurn OpenTurn(string requestId, long sequence)
+        {
+            var turn = new NpcifyStreamTurn(requestId, sequence);
             lock (_playbackGate)
             {
                 _turns.Add(turn);
@@ -205,7 +212,7 @@ namespace Npcify.Sdk.Character
                 {
                     return;
                 }
-                PlayStaging(staging);
+                PlayStaging(staging, IsNewestRequest(sequence));
             }
         }
 
@@ -240,8 +247,10 @@ namespace Npcify.Sdk.Character
                 var turn = FindTurn(taskId);
                 if (turn != null)
                 {
+                    // At once: the events of a rerun can come before the next Tick.
                     turn.ExpectRerun();
-                    Note(turn, "the request is sent again");
+                    // The notes come on the thread that calls Tick, as all other events.
+                    _mainThreadWork.Enqueue(() => Note(turn, "the request is sent again"));
                 }
             }
         }
@@ -344,9 +353,17 @@ namespace Npcify.Sdk.Character
                 stop.Stopped = StopPlayback();
             }
             turn.Restart(firstEvent);
-            _thinking = true;
             Note(turn, "the server runs the turn again");
+            var generation = _playGeneration;
             Report(stop);
+            if (generation != _playGeneration)
+            {
+                // A handler of the first run's end stopped or replaced speech: the rerun does not play.
+                turn.Stop(NpcifyTurnStop.Game);
+                ForgetClosedTurns();
+                return;
+            }
+            _thinking = true;
         }
 
         // Prepares the audio of ready blocks, starts the playback once the first block can play,
@@ -392,7 +409,10 @@ namespace Npcify.Sdk.Character
         private void StartStreamPlayback(NpcifyStreamTurn turn)
         {
             _playGeneration++;
-            _thinking = false;
+            if (IsNewestRequest(turn.Sequence))
+            {
+                _thinking = false;
+            }
             var stop = StopPlayingTurn(NpcifyTurnStop.Superseded);
             stop.Stopped |= StopPlayback();
             SupersedeOlderTurns(turn.Sequence);
@@ -492,7 +512,10 @@ namespace Npcify.Sdk.Character
                 ForgetClosedTurns();
                 return;
             }
-            _thinking = false;
+            if (IsNewestRequest(turn.Sequence))
+            {
+                _thinking = false;
+            }
             Report(StopPlayingTurn(reason));
         }
 

@@ -63,10 +63,10 @@ namespace Npcify.Sdk.Character
         // The request was sent again: the server can run the turn again.
         private bool _rerunExpected;
 
-        public NpcifyStreamTurn(string taskId)
+        public NpcifyStreamTurn(string taskId, long sequence = 0)
         {
             TaskId = (taskId ?? string.Empty).Trim().ToLowerInvariant();
-            Sequence = NextSequence();
+            Sequence = sequence > 0 ? sequence : NextSequence();
             Payload = new StagingResultPayload { ProtocolVersion = 1, TaskId = TaskId };
         }
 
@@ -199,15 +199,23 @@ namespace Npcify.Sdk.Character
 
         /// <summary>
         /// Applies the HTTP result. Returns false when the result plays as a whole: no revision
-        /// arrived, or the server failed the stream (a rerun whose events did not arrive). A turn
-        /// that the game stopped or that a newer reply replaced does not play again: it takes the
-        /// complete staging of the result. Speech whose stream did not complete takes the stored
-        /// audio of the result. Throws InvalidDataException when the result changes published
-        /// dialogue, or when the SDK refused a revision of this turn.
+        /// arrived, the server failed the stream, or after a retry the result does not continue
+        /// the published dialogue (a rerun whose events did not arrive). A turn that the game
+        /// stopped or that a newer reply replaced does not play again: it takes the complete
+        /// staging of the result. Speech whose stream did not complete takes the stored audio of
+        /// the result. Throws InvalidDataException when the result changes published dialogue
+        /// without a retry, or when the SDK refused a revision of this turn.
         /// </summary>
         public bool ApplyResult(StagingResultPayload result)
         {
             if (result == null)
+            {
+                return false;
+            }
+            var rerun = _rerunExpected && !IsFinalStop(StopReason) && !Continues(result.Timeline ?? new StagingTimeline());
+            // The request is answered: no rerun comes any more.
+            _rerunExpected = false;
+            if (rerun)
             {
                 return false;
             }
@@ -392,6 +400,12 @@ namespace Npcify.Sdk.Character
 
         private NpcifyStreamChange ApplyOptions(Dictionary<string, object> streamEvent)
         {
+            if (RerunPossible && (!HasFinal || GetString(streamEvent, "text") != Payload.Text))
+            {
+                // After a retry these can be the options of a rerun whose other events are lost:
+                // they do not change this reply. The options come with the rerun or its result.
+                return NpcifyStreamChange.None;
+            }
             if (HasFinal)
             {
                 return NpcifyStreamChange.None;
