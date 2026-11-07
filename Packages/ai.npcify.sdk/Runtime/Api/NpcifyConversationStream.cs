@@ -90,9 +90,9 @@ namespace Npcify.Sdk.Api
 
     /// <summary>
     /// The conversation stream of the server (<c>conversations:stream</c> over Socket.IO): the
-    /// SDK joins the room of its conversation before a turn, so that live motion frames reach it
-    /// while the server generates the turn. It reconnects after a lost connection and joins the
-    /// conversation again. Events arrive on a background thread.
+    /// SDK joins the room of its conversation before a turn, so that the streamed reply and the
+    /// live motion frames reach it while the server generates the turn. It reconnects after a
+    /// lost connection and joins the conversation again. Events arrive on a background thread.
     /// </summary>
     public sealed class NpcifyConversationStream : IDisposable
     {

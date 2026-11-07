@@ -26,6 +26,12 @@ namespace Npcify.Sdk.Models
         /// when a rig can play it, so a character without such a rig keeps its prepared clips.
         /// </summary>
         public Npcify.Sdk.Motion.NpcifyLiveMotionOptions LiveMotion = new Npcify.Sdk.Motion.NpcifyLiveMotionOptions();
+        /// <summary>
+        /// Play a reply while the server makes it (docs/streaming_reply.md): its first dialogue
+        /// block plays when its audio is ready, before the reply is complete. Off, or without the
+        /// conversation stream (WebGL), a reply plays after its HTTP result.
+        /// </summary>
+        public bool StreamPlayback = true;
 
         public string ResolvedToken =>
             !string.IsNullOrWhiteSpace(ApiToken)
@@ -108,6 +114,11 @@ namespace Npcify.Sdk.Models
         public List<StagingVisemeCue> Visemes = new List<StagingVisemeCue>();
         public List<StagingWordCue> Words = new List<StagingWordCue>();
         public List<StagingCharacterCue> Characters = new List<StagingCharacterCue>();
+        /// <summary>
+        /// The last speech block of a streamed reply can still grow: later revisions extend its
+        /// timing and lip-sync until its synthesis and alignment finish (docs/streaming_reply.md).
+        /// </summary>
+        public bool Pending;
     }
 
     [Serializable]

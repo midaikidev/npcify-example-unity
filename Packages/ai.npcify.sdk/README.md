@@ -15,6 +15,7 @@ Unity Package Manager (UPM) client for embedding Npcify AI characters into Unity
   - Custom Unity Editor Inspector (`NpcifyCharacterEditor`) to import `npcify-unity-sdk.json` exported from the Npcify dashboard and auto-bind avatar rigs.
   - Voice input: push-to-talk key or UI button, `StartListening` / `StopListeningAsync` / `CancelListening`, and the `InputModes` configuration. See [Voice input](#voice-input).
   - Live motion: the generated body motion of each reply on a UniVRM 1.0 model, and `PrepareLiveMotionAsync()`. See [Live motion](#live-motion).
+  - Streamed replies: a reply starts to play when the audio of its first block is complete, before the reply is complete. See [Streamed replies](#streamed-replies).
 
 ## Installation
 
@@ -32,14 +33,14 @@ Add the Npcify scoped registry and `ai.npcify.sdk` to `Packages/manifest.json`:
     }
   ],
   "dependencies": {
-    "ai.npcify.sdk": "0.5.0"
+    "ai.npcify.sdk": "0.6.0"
   }
 }
 ```
 
 ### Option 2: Download `.tgz` Tarball
 
-Download the latest UPM package tarball from `https://npcify.ai/sdk/unity/latest` (or a specific version from `https://npcify.ai/sdk/unity/app/0.5.0`), then in Unity open **Window > Package Manager > + > Install package from tarball...** and select the downloaded `ai.npcify.sdk-0.5.0.tgz` file.
+Download the latest UPM package tarball from `https://npcify.ai/sdk/unity/latest` (or a specific version from `https://npcify.ai/sdk/unity/app/0.6.0`), then in Unity open **Window > Package Manager > + > Install package from tarball...** and select the downloaded `ai.npcify.sdk-0.6.0.tgz` file.
 
 ## Quick Start (3D Game Integration)
 
@@ -92,10 +93,11 @@ public sealed class NpcifyGameExample : MonoBehaviour
 
 ## Speech Audio, Threading and Conversations
 
-- Speech audio arrives as MPEG bytes (baked conversations) or as a signed URL
-  (live stagings). `NpcifyCharacter` loads both with `UnityWebRequestMultimedia`
-  before the staging starts, so audio, visemes and the typewriter text start
-  together. WAV and raw PCM bytes still decode in C#.
+- Speech audio arrives as MPEG bytes (baked conversations and streamed replies)
+  or as a signed URL (the HTTP result of a turn). `NpcifyCharacter` loads both
+  with `UnityWebRequestMultimedia` before the block or the staging starts, so
+  audio, visemes and the typewriter text start together. WAV and raw PCM bytes
+  still decode in C#.
 - The async methods (`CreateConversationAsync`, `SpeakAsync`, `ReplyAsync`,
   `StartBakedConversationAsync`) resume on the caller's synchronization context,
   that is the Unity main thread.
@@ -106,6 +108,42 @@ public sealed class NpcifyGameExample : MonoBehaviour
   staging. Play them with your own animation system (for example UniVRM
   `Vrm10AnimationInstance` for the character's VRMA files). An `Animator` with a
   controller that has a state of that name also plays it.
+
+## Streamed Replies
+
+Since 0.6.0 a reply plays while the server makes it, as in the Web SDK
+([streaming reply](../../docs/streaming_reply.md#engine-sdks)). The first
+dialogue block plays when its audio is complete; the next blocks follow without
+a gap and without a repeated block.
+
+- **Transport:** the runtime joins the conversation stream (Socket.IO over a
+  WebSocket) when the conversation starts. A turn waits for the join for
+  `Runtime.TurnJoinWaitMilliseconds` (3000) at most.
+- **Audio:** the speech of a block arrives as MP3 chunks. When the chunks of a
+  block are complete, `NpcifyCharacter` decodes them (`Runtime.BlockAudioPreparer`)
+  and the block can start. The last block can play while the server still
+  aligns its lip-sync: later revisions add to its visemes and text timing. A
+  block whose chunks did not arrive plays the stored audio of the HTTP result.
+- **Clock:** at the end of the ready blocks the reply waits with a neutral mouth
+  until the next block can play. The staging clock, and with it the live motion
+  frames, waits too.
+- **Events:** `OnSpeechStart` fires when the first block plays. `OnSpeechEnd`
+  fires once, after the last block and when the reply options are known. The
+  task of `SpeakAsync` or `ReplyAsync` completes with the HTTP result, after the
+  reply started to play, and gives the same staging object as `OnSpeechStart`
+  and `OnSpeechEnd`. The reply can play before the task completes: use
+  `OnSpeechStart` to show its text.
+- **Fallback:** without the stream (no join in time, a lost connection, an older
+  server, WebGL) the reply plays after its HTTP result, as before 0.6.0. A
+  stream error stops the reply; the task then fails with the error of the
+  request. `StopSpeaking()` stops a streamed reply for good.
+- **Options:** `streamReplies` (Inspector) or `NpcifyOptions.StreamPlayback`
+  turns streaming off. `NpcifyApiClient.TurnTimeout` (120 s) limits a turn
+  request: the server answers after it aligned all the speech of the reply.
+  `Runtime.OnStreamLog` reports when the first revision, the first audio and the
+  playback of each streamed reply came.
+- **Own integrations:** a runtime with a `StagingPreparer` but no
+  `BlockAudioPreparer` plays each reply after its HTTP result, as before.
 
 ## Voice Input
 
@@ -191,9 +229,9 @@ clips.
   `LiveMotionTarget`; `NpcifyLiveMotionRig` maps the frames onto your rig from
   its T-pose positions.
 - **Transport:** the frames come on the conversation stream (Socket.IO over a
-  WebSocket, `System.Net.WebSockets.ClientWebSocket`). A turn declares the
-  frames only when the stream has joined the conversation, and waits for the
-  join for `Runtime.TurnJoinWaitMilliseconds` (3000) at most. After that time,
+  WebSocket, `System.Net.WebSockets.ClientWebSocket`), with the streamed reply.
+  A turn declares the frames only when the stream has joined the conversation,
+  and waits for the join for `Runtime.TurnJoinWaitMilliseconds` (3000) at most. After that time,
   or at once while the stream fails, the turn plays the prepared clips and the
   stream connects again in the background. The SDK does not try again a
   conversation that the server refuses (for example after you rotate the API

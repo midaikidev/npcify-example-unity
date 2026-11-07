@@ -47,15 +47,29 @@ namespace Npcify.Sdk.Api
             }
             else
             {
+                // Each request has its own limit: RequestTimeout, or TurnTimeout for a turn.
                 _httpClient = new HttpClient
                 {
-                    Timeout = TimeSpan.FromSeconds(30),
+                    Timeout = System.Threading.Timeout.InfiniteTimeSpan,
                 };
                 _ownsHttpClient = true;
             }
         }
 
         public NpcifyOptions Options => _options;
+
+        /// <summary>
+        /// The longest time that a request waits for its answer, except a turn request. An
+        /// HttpClient of the caller keeps its own timeout.
+        /// </summary>
+        public TimeSpan RequestTimeout { get; set; } = TimeSpan.FromSeconds(30);
+
+        /// <summary>
+        /// The longest time that a turn request (CreateStagingAsync) waits for its answer. The
+        /// server answers after it aligned the speech of the reply, so about as long as the speech
+        /// lasts; a streamed reply plays before the answer.
+        /// </summary>
+        public TimeSpan TurnTimeout { get; set; } = TimeSpan.FromSeconds(120);
 
         public string BaseUrl =>
             string.IsNullOrWhiteSpace(_options.BaseUrl)
@@ -66,7 +80,7 @@ namespace Npcify.Sdk.Api
         {
             var url = $"{BaseUrl}/avatars/{Uri.EscapeDataString(_options.CharacterId)}/info";
             using (var request = CreateRequest(HttpMethod.Get, url, "application/json"))
-            using (var response = await _httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false))
+            using (var response = await SendAsync(request, null, cancellationToken).ConfigureAwait(false))
             {
                 await EnsureSuccessAsync(response).ConfigureAwait(false);
                 var json = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
@@ -86,7 +100,7 @@ namespace Npcify.Sdk.Api
             }
 
             using (var request = CreateRequest(HttpMethod.Get, url, "application/json"))
-            using (var response = await _httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false))
+            using (var response = await SendAsync(request, null, cancellationToken).ConfigureAwait(false))
             {
                 await EnsureSuccessAsync(response).ConfigureAwait(false);
                 var json = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
@@ -113,7 +127,7 @@ namespace Npcify.Sdk.Api
             }
 
             using (var request = CreateRequest(HttpMethod.Get, url, "application/json"))
-            using (var response = await _httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false))
+            using (var response = await SendAsync(request, null, cancellationToken).ConfigureAwait(false))
             {
                 await EnsureSuccessAsync(response).ConfigureAwait(false);
                 var json = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
@@ -129,7 +143,7 @@ namespace Npcify.Sdk.Api
             }
 
             using (var request = new HttpRequestMessage(HttpMethod.Get, url))
-            using (var response = await _httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false))
+            using (var response = await SendAsync(request, null, cancellationToken).ConfigureAwait(false))
             {
                 await EnsureSuccessAsync(response).ConfigureAwait(false);
                 return await response.Content.ReadAsByteArrayAsync().ConfigureAwait(false);
@@ -155,7 +169,7 @@ namespace Npcify.Sdk.Api
                 : $"{BaseUrl}/avatars/{Uri.EscapeDataString(_options.CharacterId)}/baked-conversation/asset";
 
             using (var request = CreateRequest(HttpMethod.Get, url, NpcifyPerformanceCodec.MediaType))
-            using (var response = await _httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false))
+            using (var response = await SendAsync(request, null, cancellationToken).ConfigureAwait(false))
             {
                 await EnsureSuccessAsync(response).ConfigureAwait(false);
                 var bytes = await response.Content.ReadAsByteArrayAsync().ConfigureAwait(false);
@@ -185,7 +199,7 @@ namespace Npcify.Sdk.Api
             var jsonBody = $"{{\"avatarId\":{EncodeJsonString(_options.CharacterId)}{EncodeCapabilities(capabilities)}}}";
 
             using (var request = CreateJsonPostRequest(url, jsonBody, NpcifyPerformanceCodec.MediaType, null, renderSessionId))
-            using (var response = await _httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false))
+            using (var response = await SendAsync(request, null, cancellationToken).ConfigureAwait(false))
             {
                 await EnsureSuccessAsync(response).ConfigureAwait(false);
                 var responseBytes = await response.Content.ReadAsByteArrayAsync().ConfigureAwait(false);
@@ -270,7 +284,7 @@ namespace Npcify.Sdk.Api
                         NpcifyPerformanceCodec.MediaType,
                         idempotencyKey,
                         renderSessionId))
-                    using (var response = await _httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false))
+                    using (var response = await SendAsync(request, TurnTimeout, cancellationToken).ConfigureAwait(false))
                     {
                         if (response.IsSuccessStatusCode)
                         {
@@ -326,7 +340,7 @@ namespace Npcify.Sdk.Api
             {
                 request.Content = new ByteArrayContent(wav);
                 request.Content.Headers.ContentType = new MediaTypeHeaderValue("audio/wav");
-                using (var response = await _httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false))
+                using (var response = await SendAsync(request, null, cancellationToken).ConfigureAwait(false))
                 {
                     await EnsureSuccessAsync(response).ConfigureAwait(false);
                     var json = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
@@ -360,7 +374,7 @@ namespace Npcify.Sdk.Api
             try
             {
                 using (var request = CreateJsonPostRequest(url, jsonBody, "application/json"))
-                using (var response = await _httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false))
+                using (var response = await SendAsync(request, null, cancellationToken).ConfigureAwait(false))
                 {
                     if (!response.IsSuccessStatusCode)
                     {
@@ -399,7 +413,7 @@ namespace Npcify.Sdk.Api
             var url =
                 $"{BaseUrl}/conversations/{Uri.EscapeDataString(conversationId)}/stagings/{Uri.EscapeDataString(stagingId)}";
             using (var request = CreateRequest(HttpMethod.Get, url, NpcifyPerformanceCodec.MediaType, renderSessionId))
-            using (var response = await _httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false))
+            using (var response = await SendAsync(request, null, cancellationToken).ConfigureAwait(false))
             {
                 await EnsureSuccessAsync(response).ConfigureAwait(false);
                 var responseBytes = await response.Content.ReadAsByteArrayAsync().ConfigureAwait(false);
@@ -448,6 +462,22 @@ namespace Npcify.Sdk.Api
 
             request.Content = new StringContent(jsonBody, Encoding.UTF8, "application/json");
             return request;
+        }
+
+        private async Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            TimeSpan? timeout,
+            CancellationToken cancellationToken)
+        {
+            if (!_ownsHttpClient)
+            {
+                return await _httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
+            }
+            using (var limit = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
+            {
+                limit.CancelAfter(timeout ?? RequestTimeout);
+                return await _httpClient.SendAsync(request, limit.Token).ConfigureAwait(false);
+            }
         }
 
         private static bool ShouldRetryStaging(HttpStatusCode statusCode)

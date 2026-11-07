@@ -136,6 +136,7 @@ namespace Npcify.Sdk.Unity
                 ? new List<Npcify.Sdk.Speech.NpcifyInputMode>(options.InputModes)
                 : new List<Npcify.Sdk.Speech.NpcifyInputMode>();
             ApplyLiveMotionOptions(options.LiveMotion);
+            streamReplies = options.StreamPlayback;
             RebuildRuntime();
         }
 
@@ -419,12 +420,18 @@ namespace Npcify.Sdk.Unity
                     ? new List<Npcify.Sdk.Speech.NpcifyInputMode>(inputModes)
                     : null,
                 LiveMotion = BuildLiveMotionOptions(),
+                StreamPlayback = streamReplies,
             };
 
             _runtime = new NpcifyCharacterRuntime(options);
             _runtime.StagingPreparer = PrepareStagingAudioAsync;
+            _runtime.BlockAudioPreparer = PrepareBlockAudioAsync;
             _runtime.Expressions.AutoBlinkEnabled = autoBlink;
-            _runtime.OnSpeechStart += staging => OnSpeechStart?.Invoke(staging);
+            _runtime.OnSpeechStart += staging =>
+            {
+                ReleaseClipsOfOtherStagings(staging);
+                OnSpeechStart?.Invoke(staging);
+            };
             _runtime.OnSpeechEnd += staging => OnSpeechEnd?.Invoke(staging);
             _runtime.OnCharacterRevealed += (text, cue) => OnCharacterRevealed?.Invoke(text, cue);
             _runtime.OnAudioBlock += HandleAudioBlock;

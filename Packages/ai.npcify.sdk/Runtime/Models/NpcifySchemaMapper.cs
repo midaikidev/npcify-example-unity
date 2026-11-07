@@ -196,6 +196,7 @@ namespace Npcify.Sdk.Models
                 EndTime = endTime,
                 Text = GetString(map, "text") ?? string.Empty,
                 Duration = GetDouble(map, "duration", Math.Max(0.0, endTime - startTime)),
+                Pending = GetBool(map, "pending", false),
             };
 
             var audioMap = GetMap(map, "audio");

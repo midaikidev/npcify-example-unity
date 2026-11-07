@@ -19,6 +19,11 @@ namespace Npcify.Sdk.Character
         private double _timelineElapsedSeconds;
         private int _nextCharCueIndex;
         private bool _isPlaying;
+        // A streamed staging (PlayStream): its dialogue grows, and a block starts only when ready.
+        private Func<int, bool> _isBlockReady;
+        private bool _dialogueComplete = true;
+        // The block that the playback waits for (-1: none); the clock does not run meanwhile.
+        private int _waitingBlockIndex = -1;
 
         public NpcifyStagingPlayer(NpcifyFacialMixer facialMixer, NpcifyVisemePlayer visemePlayer)
         {
@@ -34,6 +39,12 @@ namespace Npcify.Sdk.Character
         public event Action<StagingResultPayload> OnStagingCompleted;
 
         public bool IsPlaying => _isPlaying;
+
+        /// <summary>
+        /// A streamed staging waits for its next dialogue block (docs/streaming_reply.md). The
+        /// staging clock stops meanwhile; the playback stays on.
+        /// </summary>
+        public bool IsWaitingForBlock => _isPlaying && _waitingBlockIndex >= 0;
 
         public StagingResultPayload CurrentStaging => _staging;
 
@@ -73,12 +84,77 @@ namespace Npcify.Sdk.Character
 
         public void Play(StagingResultPayload staging)
         {
+            Start(staging, null, true);
+        }
+
+        /// <summary>
+        /// Plays a staging whose dialogue still grows (a streamed reply, docs/streaming_reply.md).
+        /// Block i starts only when <paramref name="isBlockReady"/>(i) is true. At the end of the
+        /// ready blocks the playback waits, with a stopped clock, until the next block is ready or
+        /// <see cref="CompleteStream"/> says that no block follows.
+        /// </summary>
+        public void PlayStream(StagingResultPayload staging, Func<int, bool> isBlockReady)
+        {
+            Start(staging, isBlockReady ?? (_ => true), false);
+        }
+
+        /// <summary>The streamed staging that plays has its complete dialogue now.</summary>
+        public void CompleteStream()
+        {
+            _dialogueComplete = true;
+        }
+
+        /// <summary>
+        /// A revision changed the block that plays (a pending block grows): its lip-sync cues load
+        /// again, at the same block time.
+        /// </summary>
+        public void RefreshCurrentBlock()
+        {
+            var block = CurrentBlock;
+            if (_isPlaying && _waitingBlockIndex < 0 && block != null)
+            {
+                _visemePlayer.LoadCues(block.Visemes);
+            }
+        }
+
+        /// <summary>
+        /// Clips of a new revision that ended before the current staging time do not play; clips
+        /// that started earlier and still run play for the rest of their time.
+        /// </summary>
+        public void SkipElapsedClips()
+        {
+            var timeline = _staging?.Timeline;
+            if (!_isPlaying || timeline == null)
+            {
+                return;
+            }
+            foreach (var clip in timeline.Expressions ?? new List<StagingExpressionClip>())
+            {
+                if (clip != null && clip.EndTime <= _timelineElapsedSeconds)
+                {
+                    _triggeredExpressionIds.Add(ClipKey(clip.Id, clip.Expression, clip.StartTime));
+                }
+            }
+            foreach (var clip in timeline.Animations ?? new List<StagingAnimationClip>())
+            {
+                if (clip != null && clip.EndTime <= _timelineElapsedSeconds)
+                {
+                    _triggeredAnimationIds.Add(ClipKey(clip.Id, clip.Animation, clip.StartTime));
+                }
+            }
+        }
+
+        private void Start(StagingResultPayload staging, Func<int, bool> isBlockReady, bool dialogueComplete)
+        {
             if (staging == null)
             {
                 throw new ArgumentNullException(nameof(staging));
             }
 
             _staging = staging;
+            _isBlockReady = isBlockReady;
+            _dialogueComplete = dialogueComplete;
+            _waitingBlockIndex = -1;
             _triggeredExpressionIds.Clear();
             _triggeredAnimationIds.Clear();
             _revealedBuilder.Clear();
@@ -88,7 +164,7 @@ namespace Npcify.Sdk.Character
             _nextCharCueIndex = 0;
 
             var dialogue = staging.Timeline?.Dialogue;
-            if (dialogue == null || dialogue.Count == 0)
+            if (dialogueComplete && (dialogue == null || dialogue.Count == 0))
             {
                 _isPlaying = false;
                 EvaluateGlobalTracks(0.0);
@@ -97,7 +173,14 @@ namespace Npcify.Sdk.Character
             }
 
             _isPlaying = true;
-            AdvanceToBlock(0);
+            if (IsBlockReady(0))
+            {
+                AdvanceToBlock(0);
+            }
+            else
+            {
+                WaitForBlock(0);
+            }
             EvaluateGlobalTracks(0.0);
         }
 
@@ -120,6 +203,7 @@ namespace Npcify.Sdk.Character
         public void Stop()
         {
             _isPlaying = false;
+            _waitingBlockIndex = -1;
             _visemePlayer.Clear();
             _facialMixer.ClearVisemes();
         }
@@ -129,6 +213,28 @@ namespace Npcify.Sdk.Character
             var dt = Math.Max(0.0, deltaTimeSeconds);
             if (!_isPlaying || _staging == null)
             {
+                _facialMixer.Update((float)dt);
+                return;
+            }
+
+            if (_waitingBlockIndex >= 0)
+            {
+                // A generation gap does not advance the staging clock.
+                if (ResumeWaitingBlock())
+                {
+                    EvaluateGlobalTracks(_timelineElapsedSeconds);
+                    EvaluateCurrentBlock(fallbackAudioRms);
+                }
+                _facialMixer.Update((float)dt);
+                return;
+            }
+
+            var current = CurrentBlock;
+            if (current != null && current.Pending && _blockElapsedSeconds >= ComputeBlockDuration(current))
+            {
+                // A pending block ends with its final version; until then the clock waits.
+                _visemePlayer.Clear();
+                _facialMixer.ClearVisemes();
                 _facialMixer.Update((float)dt);
                 return;
             }
@@ -185,7 +291,7 @@ namespace Npcify.Sdk.Character
             _facialMixer.SetVisemeWeights(visemeWeights);
 
             var duration = ComputeBlockDuration(block);
-            if (_blockElapsedSeconds >= duration)
+            if (_blockElapsedSeconds >= duration && !block.Pending)
             {
                 if (_revealedBuilder.Length < (block.Text?.Length ?? 0))
                 {
@@ -197,15 +303,56 @@ namespace Npcify.Sdk.Character
 
                 var nextIndex = _currentBlockIndex + 1;
                 var dialogue = _staging?.Timeline?.Dialogue;
-                if (dialogue != null && nextIndex < dialogue.Count)
+                if (dialogue != null && nextIndex < dialogue.Count && IsBlockReady(nextIndex))
                 {
                     AdvanceToBlock(nextIndex);
                 }
-                else
+                else if (_dialogueComplete && (dialogue == null || nextIndex >= dialogue.Count))
                 {
                     CompletePlayback();
                 }
+                else
+                {
+                    WaitForBlock(nextIndex);
+                }
             }
+        }
+
+        private bool IsBlockReady(int index)
+        {
+            return _isBlockReady == null || _isBlockReady(index);
+        }
+
+        // The end of the ready dialogue of a streamed staging: neutral mouth until the next block.
+        private void WaitForBlock(int index)
+        {
+            _waitingBlockIndex = index;
+            _visemePlayer.Clear();
+            _facialMixer.ClearVisemes();
+        }
+
+        private bool ResumeWaitingBlock()
+        {
+            var index = _waitingBlockIndex;
+            var dialogue = _staging?.Timeline?.Dialogue;
+            if (dialogue != null && index < dialogue.Count && IsBlockReady(index))
+            {
+                _waitingBlockIndex = -1;
+                AdvanceToBlock(index);
+                return _isPlaying;
+            }
+            if (_dialogueComplete && (dialogue == null || index >= dialogue.Count))
+            {
+                _waitingBlockIndex = -1;
+                CompletePlayback();
+            }
+            return false;
+        }
+
+        private static string ClipKey(string id, string name, double startTime)
+        {
+            // Not the list index: a revision can add a clip in front of clips that played.
+            return !string.IsNullOrEmpty(id) ? id : $"{name}:{startTime:F3}";
         }
 
         private void EvaluateCharacterCues(StagingDialogueBlock block)
@@ -256,14 +403,13 @@ namespace Npcify.Sdk.Character
                         continue;
                     }
 
-                    var clipKey = !string.IsNullOrEmpty(clip.Id)
-                        ? clip.Id
-                        : $"{i}:{clip.Expression}:{clip.StartTime:F3}";
+                    var clipKey = ClipKey(clip.Id, clip.Expression, clip.StartTime);
 
                     if (!_triggeredExpressionIds.Contains(clipKey) && timelineSeconds + 1e-6 >= clip.StartTime)
                     {
                         _triggeredExpressionIds.Add(clipKey);
-                        var duration = Math.Max(0.15f, (float)(clip.EndTime - clip.StartTime));
+                        // A clip that a revision added after its start plays for the rest of its time.
+                        var duration = Math.Max(0.15f, (float)(clip.EndTime - Math.Max(clip.StartTime, timelineSeconds)));
                         var weight = clip.Weight <= 0.0 ? 1f : (float)clip.Weight;
                         _facialMixer.PlayCue(clip.Expression, weight, duration, 0.12f, 0.2f);
                         OnExpressionClipTriggered?.Invoke(clip);
@@ -281,9 +427,7 @@ namespace Npcify.Sdk.Character
                         continue;
                     }
 
-                    var clipKey = !string.IsNullOrEmpty(clip.Id)
-                        ? clip.Id
-                        : $"{i}:{clip.Animation}:{clip.StartTime:F3}";
+                    var clipKey = ClipKey(clip.Id, clip.Animation, clip.StartTime);
 
                     if (!_triggeredAnimationIds.Contains(clipKey) && timelineSeconds + 1e-6 >= clip.StartTime)
                     {

@@ -20,7 +20,10 @@ namespace Npcify.Sdk.Character
         /// </summary>
         public bool LiveMotionTargetReady { get; set; }
 
-        /// <summary>The conversation stream that carries the live motion frames, once a turn asked for them.</summary>
+        /// <summary>
+        /// The conversation stream: it carries the streamed replies and the live motion frames,
+        /// once a conversation or a turn needed it.
+        /// </summary>
         public NpcifyConversationStream ConversationStream => _stream;
 
         /// <summary>Notes of the conversation stream, for logs.</summary>
@@ -49,32 +52,47 @@ namespace Npcify.Sdk.Character
         public int TurnJoinWaitMilliseconds { get; set; } = 3000;
 
         // A turn stopped waiting for the stream of this conversation; later turns do not wait for it.
-        private string _liveMotionJoinGivenUp;
+        private string _streamJoinGivenUp;
+
+        private struct TurnStream
+        {
+            public bool Joined;
+            // Always sent: without the list the server uses the capabilities of the conversation.
+            public IReadOnlyList<string> Capabilities;
+        }
 
         /// <summary>
-        /// The capabilities of a turn. Live motion frames arrive on the conversation stream while the
-        /// server makes the turn, so a turn declares them only when the stream has joined. A turn
-        /// waits a few seconds for the join at most and does not wait for a join that is known to
-        /// fail: it then gets the prepared clips, while the stream tries again in the background.
+        /// The stream of a turn. The streamed reply and the live motion frames arrive on the
+        /// conversation stream while the server makes the turn, so a turn uses them only when the
+        /// stream has joined. A turn waits a few seconds for the join at most and does not wait for
+        /// a join that is known to fail: the reply then plays after its HTTP result with the
+        /// prepared clips, while the stream tries again in the background.
         /// </summary>
-        private async Task<IReadOnlyList<string>> ResolveTurnCapabilitiesAsync(
+        private async Task<TurnStream> ResolveTurnStreamAsync(
             string conversationId,
             CancellationToken cancellationToken)
         {
-            if (!WantsLiveMotion)
+            var none = new TurnStream { Joined = false, Capabilities = Array.Empty<string>() };
+            var live = WantsLiveMotion;
+            if (!live && !StreamPlaybackEnabled)
             {
-                return Array.Empty<string>();
+                return none;
             }
+            var joined = new TurnStream
+            {
+                Joined = true,
+                Capabilities = live ? LiveMotionCapabilities : Array.Empty<string>(),
+            };
             if (_stream != null && _stream.IsJoined(conversationId))
             {
-                return LiveMotionCapabilities;
+                return joined;
             }
-            if (_liveMotionJoinGivenUp == conversationId ||
+            if (_streamJoinGivenUp == conversationId ||
                 (_stream != null && (_stream.IsFailing(conversationId) || _stream.IsRefused(conversationId))))
             {
-                return Array.Empty<string>();
+                return none;
             }
-            var join = JoinLiveMotionStreamAsync(conversationId, CancellationToken.None);
+            var join = JoinStreamAsync(conversationId, CancellationToken.None);
             using (var wait = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
             {
                 var finished = await Task.WhenAny(join, Task.Delay(Math.Max(0, TurnJoinWaitMilliseconds), wait.Token));
@@ -82,11 +100,11 @@ namespace Npcify.Sdk.Character
                 cancellationToken.ThrowIfCancellationRequested();
                 if (finished == join && join.Result)
                 {
-                    return LiveMotionCapabilities;
+                    return joined;
                 }
             }
-            _liveMotionJoinGivenUp = conversationId;
-            return Array.Empty<string>();
+            _streamJoinGivenUp = conversationId;
+            return none;
         }
 
         /// <summary>
@@ -109,11 +127,11 @@ namespace Npcify.Sdk.Character
             }
             _liveMotionPrepared = conversationId;
             // The stream joins in the background; the warm-up does not wait for it.
-            _ = JoinLiveMotionStreamAsync(conversationId, CancellationToken.None);
+            _ = JoinStreamAsync(conversationId, CancellationToken.None);
             return await _api.WarmUpLiveMotionAsync(conversationId, cancellationToken);
         }
 
-        private async Task<bool> JoinLiveMotionStreamAsync(string conversationId, CancellationToken cancellationToken)
+        private async Task<bool> JoinStreamAsync(string conversationId, CancellationToken cancellationToken)
         {
             if (_stream == null)
             {
@@ -142,6 +160,11 @@ namespace Npcify.Sdk.Character
                     _liveMotion.Push(motion);
                     OnMotionFrames?.Invoke(motion);
                 });
+                return;
+            }
+            if (streamEvent != null && streamEvent.TryGetValue("type", out var type) && IsTurnEvent(type as string))
+            {
+                EnqueueTurnEvent(streamEvent);
             }
         }
 

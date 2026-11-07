@@ -130,6 +130,7 @@ namespace NpcifyDemo
             _conversation?.Cancel();
             _conversation?.Dispose();
             _conversation = null;
+            _active.Character.OnSpeechStart -= HandleSpeechStart;
             _active.Character.OnSpeechEnd -= HandleSpeechEnd;
             _active.EndConversation();
             _active = null;
@@ -228,6 +229,7 @@ namespace NpcifyDemo
             view.ShowDialogue(npc.DisplayName, npc.ModeLabel, npc.AllowCustomReply);
             dialogueCamera.Focus(player, npc);
             npc.FaceTowards(playerLookTarget != null ? playerLookTarget : player);
+            npc.Character.OnSpeechStart += HandleSpeechStart;
             npc.Character.OnSpeechEnd += HandleSpeechEnd;
             SetPlayerControl(false);
             _ = BeginAsync();
@@ -299,6 +301,17 @@ namespace NpcifyDemo
             }
             _active.Character.StopSpeaking();
             EnterChoosing();
+        }
+
+        // A streamed reply starts to play before its task completes (Npcify SDK 0.6.0).
+        private void HandleSpeechStart(StagingResultPayload staging)
+        {
+            if (_active != null && _phase == Phase.Waiting)
+            {
+                _staging = staging;
+                _phase = Phase.Speaking;
+                view.SetHint("Space  Skip    Esc  Leave");
+            }
         }
 
         private void HandleSpeechEnd(StagingResultPayload staging)

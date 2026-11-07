@@ -68,7 +68,7 @@ namespace Npcify.Sdk.Character
             _stagingPlayer.OnCharacterRevealed += (text, cue) => OnCharacterRevealed?.Invoke(text, cue);
             _stagingPlayer.OnAnimationClipTriggered += clip =>
                 PlayAnimation(clip.Animation, clip.Loop);
-            _stagingPlayer.OnStagingCompleted += staging => OnSpeechEnd?.Invoke(staging);
+            _stagingPlayer.OnStagingCompleted += HandleStagingCompleted;
         }
 
         public event Action<StagingResultPayload> OnSpeechStart;
@@ -204,10 +204,10 @@ namespace Npcify.Sdk.Character
                 var created = await _api.CreateConversationAsync(null, LiveMotionCapabilities, cancellationToken);
                 _conversationId = created.ConversationId;
                 _activeStagingId = created.OpeningStaging?.StagingId;
-                if (WantsLiveMotion)
+                if (WantsLiveMotion || StreamPlaybackEnabled)
                 {
                     // Join the stream early, so that the first turn does not wait for it.
-                    _ = JoinLiveMotionStreamAsync(_conversationId, CancellationToken.None);
+                    _ = JoinStreamAsync(_conversationId, CancellationToken.None);
                 }
                 if (created.OpeningStaging != null)
                 {
@@ -402,22 +402,7 @@ namespace Npcify.Sdk.Character
                     _activeStagingId = createdConv.OpeningStaging?.StagingId;
                 }
 
-                // Always send the list: without it the server uses the capabilities of the conversation.
-                var capabilities = await ResolveTurnCapabilitiesAsync(_conversationId, cancellationToken);
-                var staging = await _api.CreateStagingAsync(
-                    _conversationId,
-                    message,
-                    _activeStagingId,
-                    false,
-                    null,
-                    null,
-                    6,
-                    capabilities,
-                    cancellationToken
-                );
-
-                _activeStagingId = staging.StagingId;
-                await PrepareAndPlayAsync(staging, cancellationToken);
+                var staging = await RequestTurnAsync(message, cancellationToken);
                 _thinking = false;
                 return staging;
             }
@@ -446,9 +431,10 @@ namespace Npcify.Sdk.Character
         public void ResetConversation()
         {
             StopSpeaking();
+            StopStreamTurns();
             _stream?.Leave();
             _liveMotionPrepared = null;
-            _liveMotionJoinGivenUp = null;
+            _streamJoinGivenUp = null;
             _activeStagingId = null;
             _conversationId = _bakedConversation != null ? "baked:" + _bakedConversation.Asset.AvatarId : null;
         }
@@ -460,11 +446,17 @@ namespace Npcify.Sdk.Character
                 throw new ArgumentNullException(nameof(staging));
             }
 
-            _thinking = false;
-            _activeStagingId = staging.StagingId;
-            LoadStoredMotion(staging);
-            OnSpeechStart?.Invoke(staging);
-            _stagingPlayer.Play(staging);
+            lock (_playbackGate)
+            {
+                // A staging played as a whole replaces a streamed reply.
+                _playingTurn?.Stop();
+                _playingTurn = null;
+                _thinking = false;
+                _activeStagingId = staging.StagingId;
+                LoadStoredMotion(staging);
+                OnSpeechStart?.Invoke(staging);
+                _stagingPlayer.Play(staging);
+            }
         }
 
         private StagingResultPayload SelectBakedOpening(string stagingId)
@@ -492,10 +484,16 @@ namespace Npcify.Sdk.Character
             PlayStaging(staging);
         }
 
+        /// <summary>Stops the speech that plays; a streamed reply that plays does not continue.</summary>
         public void StopSpeaking()
         {
-            _thinking = false;
-            _stagingPlayer.Stop();
+            lock (_playbackGate)
+            {
+                _thinking = false;
+                _playingTurn?.Stop();
+                _playingTurn = null;
+                _stagingPlayer.Stop();
+            }
         }
 
         public void PlayAnimation(string animationId, bool loop = false)
@@ -525,17 +523,20 @@ namespace Npcify.Sdk.Character
 
         public void Tick(double deltaTimeSeconds, float fallbackAudioRms = 0f)
         {
-            while (_mainThreadWork.TryDequeue(out var work))
+            lock (_playbackGate)
             {
-                work();
+                while (_mainThreadWork.TryDequeue(out var work))
+                {
+                    work();
+                }
+                _stagingPlayer.Tick(deltaTimeSeconds, fallbackAudioRms);
+                // Live motion follows the staging clock; no staging: blend back to idle.
+                var playing = _stagingPlayer.IsPlaying ? _stagingPlayer.CurrentStaging : null;
+                _liveMotion.Update(
+                    deltaTimeSeconds,
+                    playing?.StagingId,
+                    playing != null ? _stagingPlayer.TimelineElapsedSeconds : (double?)null);
             }
-            _stagingPlayer.Tick(deltaTimeSeconds, fallbackAudioRms);
-            // Live motion follows the staging clock; no staging: blend back to idle.
-            var playing = _stagingPlayer.IsPlaying ? _stagingPlayer.CurrentStaging : null;
-            _liveMotion.Update(
-                deltaTimeSeconds,
-                playing?.StagingId,
-                playing != null ? _stagingPlayer.TimelineElapsedSeconds : (double?)null);
         }
 
         private void HandleDialogueBlockStarted(StagingDialogueBlock block)
@@ -553,6 +554,7 @@ namespace Npcify.Sdk.Character
 
         public void Dispose()
         {
+            StopStreamTurns();
             _stream?.Dispose();
             _api.Dispose();
         }
