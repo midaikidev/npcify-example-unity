@@ -134,9 +134,13 @@ a gap and without a repeated block.
   and `OnSpeechEnd`. The reply can play before the task completes: use
   `OnSpeechStart` to show its text.
 - **Fallback:** without the stream (no join in time, a lost connection, an older
-  server, WebGL) the reply plays after its HTTP result, as before 0.6.0. A
-  stream error stops the reply; the task then fails with the error of the
-  request. `StopSpeaking()` stops a streamed reply for good.
+  server, WebGL) the reply plays after its HTTP result, as before 0.6.0.
+  `StopSpeaking()` stops a streamed reply for good.
+- **Failures:** the failed request is the failure of the turn: the task fails
+  with its error. An `error` event of the stream only stops the reply earlier;
+  the server does not send one for every failure. When the SDK retries the
+  request and the server runs the turn again, the new run plays from its start.
+  An older reply never plays over a newer one.
 - **Options:** `streamReplies` (Inspector) or `NpcifyOptions.StreamPlayback`
   turns streaming off. `NpcifyApiClient.TurnTimeout` (120 s) limits a turn
   request: the server answers after it aligned all the speech of the reply.
@@ -233,10 +237,12 @@ clips.
   A turn declares the frames only when the stream has joined the conversation,
   and waits for the join for `Runtime.TurnJoinWaitMilliseconds` (3000) at most. After that time,
   or at once while the stream fails, the turn plays the prepared clips and the
-  stream connects again in the background. The SDK does not try again a
-  conversation that the server refuses (for example after you rotate the API
-  key). WebGL builds have no `ClientWebSocket`, so they keep the prepared
-  clips.
+  stream connects again in the background, with a wait of at most 10 s between
+  attempts while the runtime lives. A conversation that the server refuses (for
+  example after you rotate the API key) looks like a lost connection: the
+  server closes the connection before its refusal arrives, so the turns keep
+  the prepared clips. WebGL builds have no `ClientWebSocket`, so they keep the
+  prepared clips.
 
 ## Spatial Voice
 

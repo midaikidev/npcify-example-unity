@@ -15,19 +15,11 @@ namespace Npcify.Sdk.Character
     {
         // Tick, stream events, block audio and HTTP results change the playback under this lock.
         private readonly object _playbackGate = new object();
-        // Turns that can still start to play, oldest first; the playing turn is _playingTurn.
+        // Turns in progress, oldest first: an open request, or a reply that waits for its first block.
         private readonly List<NpcifyStreamTurn> _turns = new List<NpcifyStreamTurn>();
-        // Blocks of streamed replies: false while their audio is prepared, true when they can play.
-        private readonly Dictionary<StagingDialogueBlock, bool> _blockAudio = new Dictionary<StagingDialogueBlock, bool>();
         private NpcifyStreamTurn _playingTurn;
-        private CancellationTokenSource _blockPreparation = new CancellationTokenSource();
-
-        /// <summary>
-        /// Optional hook that prepares the audio of one dialogue block of a streamed reply, for
-        /// example to decode it. The block plays only after the hook finishes; a failure plays the
-        /// block without audio. NpcifyCharacter sets it.
-        /// </summary>
-        public Func<StagingDialogueBlock, CancellationToken, Task> BlockAudioPreparer { get; set; }
+        // The request order of the newest reply that started to play: an older reply never plays over it.
+        private long _playedSequence;
 
         /// <summary>
         /// True when replies play while they stream: NpcifyOptions.StreamPlayback is on, the
@@ -69,6 +61,7 @@ namespace Npcify.Sdk.Character
             var requestId = Guid.NewGuid().ToString("D");
             var stream = await ResolveTurnStreamAsync(conversationId, cancellationToken);
             var turn = stream.Joined && StreamPlaybackEnabled ? OpenTurn(requestId) : null;
+            var sequence = turn?.Sequence ?? NpcifyStreamTurn.NextSequence();
             StagingResultPayload staging;
             try
             {
@@ -85,12 +78,14 @@ namespace Npcify.Sdk.Character
             }
             catch (Exception) when (turn != null && !cancellationToken.IsCancellationRequested && IsCompletedByStream(turn))
             {
-                // The stream delivered the whole reply and its options: a failed answer (for
-                // example a timeout) does not fail it.
+                // The stream delivered the whole reply, its audio and its options: a failed answer
+                // (for example a timeout) does not fail it.
                 lock (_playbackGate)
                 {
-                    _activeStagingId = turn.Payload.StagingId;
+                    turn.RequestClosed = true;
+                    AdoptActiveStaging(turn.Sequence, turn.Payload.StagingId);
                     PumpTurn(turn);
+                    ForgetClosedTurns();
                 }
                 await WaitForPlaybackAsync(turn, cancellationToken);
                 return turn.Payload;
@@ -100,11 +95,12 @@ namespace Npcify.Sdk.Character
                 CloseTurn(turn, null);
                 throw;
             }
-            _activeStagingId = staging.StagingId;
+            AdoptActiveStaging(sequence, staging.StagingId);
+            // Throws when the result changes dialogue that played: the request fails.
             var streamed = CloseTurn(turn, staging);
             if (streamed == null)
             {
-                await PrepareAndPlayAsync(staging, cancellationToken);
+                await PlayTurnResultAsync(staging, sequence, cancellationToken);
                 return staging;
             }
             // As with a reply of the HTTP path, the task completes when the reply plays.
@@ -112,11 +108,20 @@ namespace Npcify.Sdk.Character
             return streamed.Payload;
         }
 
+        // The next turn continues from this staging, unless a newer reply played already.
+        private void AdoptActiveStaging(long sequence, string stagingId)
+        {
+            if (sequence >= Volatile.Read(ref _playedSequence))
+            {
+                _activeStagingId = stagingId;
+            }
+        }
+
         private bool IsCompletedByStream(NpcifyStreamTurn turn)
         {
             lock (_playbackGate)
             {
-                return turn.HasTimeline && turn.Complete && turn.HasFinal && !turn.Failed;
+                return turn.HasTimeline && turn.HasFinal && !turn.Failed && turn.AllBlocksPlayable;
             }
         }
 
@@ -132,7 +137,8 @@ namespace Npcify.Sdk.Character
 
         /// <summary>
         /// Ends the request of a turn. With a result, returns the turn when the stream plays the
-        /// reply, or null when the result plays as a whole. Without a result, stops the turn.
+        /// reply (or played it, or the game stopped it), or null when the result plays as a whole.
+        /// Without a result, stops the turn. Throws when the result changes published dialogue.
         /// </summary>
         private NpcifyStreamTurn CloseTurn(NpcifyStreamTurn turn, StagingResultPayload result)
         {
@@ -142,9 +148,10 @@ namespace Npcify.Sdk.Character
             }
             lock (_playbackGate)
             {
+                turn.RequestClosed = true;
                 if (result == null)
                 {
-                    EndTurn(turn);
+                    EndTurn(turn, NpcifyTurnStop.Failed);
                     return null;
                 }
                 bool owned;
@@ -152,40 +159,66 @@ namespace Npcify.Sdk.Character
                 {
                     owned = turn.ApplyResult(result);
                 }
-                catch (Exception error)
+                catch (Exception)
                 {
-                    EndTurn(turn);
-                    OnError?.Invoke(error);
-                    return turn;
+                    EndTurn(turn, NpcifyTurnStop.Rejected);
+                    throw;
                 }
-                Note(turn, owned ? "the HTTP result completes the streamed reply" : "the HTTP result plays: no revision arrived");
+                Note(turn, owned ? "the HTTP result completes the streamed reply" : "the HTTP result plays as a whole");
                 if (!owned)
                 {
                     // Late events of this turn are ignored: the result plays as a whole.
-                    EndTurn(turn);
+                    EndTurn(turn, NpcifyTurnStop.Superseded);
                     return null;
                 }
                 PumpTurn(turn);
+                ForgetClosedTurns();
                 return turn;
+            }
+        }
+
+        // The HTTP path: the result plays as a whole, unless a newer reply plays already.
+        private async Task PlayTurnResultAsync(StagingResultPayload staging, long sequence, CancellationToken cancellationToken)
+        {
+            if (Volatile.Read(ref _playedSequence) > sequence)
+            {
+                return;
+            }
+            var preparer = StagingPreparer;
+            if (preparer != null)
+            {
+                await preparer(staging, cancellationToken);
+            }
+            cancellationToken.ThrowIfCancellationRequested();
+            lock (_playbackGate)
+            {
+                if (_playedSequence > sequence)
+                {
+                    return;
+                }
+                _playedSequence = sequence;
+                SupersedeOlderTurns(sequence);
+                PlayStaging(staging);
             }
         }
 
         private async Task WaitForPlaybackAsync(NpcifyStreamTurn turn, CancellationToken cancellationToken)
         {
-            if (turn.Started.IsCompleted)
+            var started = turn.Started;
+            if (started.IsCompleted)
             {
                 return;
             }
             var cancelled = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
             using (cancellationToken.Register(() => cancelled.TrySetResult(true)))
             {
-                await Task.WhenAny(turn.Started, cancelled.Task);
+                await Task.WhenAny(started, cancelled.Task);
             }
-            if (!turn.Started.IsCompleted)
+            if (!started.IsCompleted)
             {
                 lock (_playbackGate)
                 {
-                    EndTurn(turn);
+                    EndTurn(turn, NpcifyTurnStop.Game);
                 }
                 cancellationToken.ThrowIfCancellationRequested();
             }
@@ -218,33 +251,36 @@ namespace Npcify.Sdk.Character
                 {
                     change = turn.Apply(streamEvent);
                 }
-                catch (Exception error)
+                catch (Exception)
                 {
-                    // A revision that changes published dialogue: the turn stops, nothing replays.
-                    EndTurn(turn);
-                    OnError?.Invoke(error);
+                    // A revision that changes published dialogue: the reply stops, nothing replays.
+                    // The request reports the failure (or its result does not match either).
+                    Note(turn, "a revision changed published dialogue");
+                    EndTurn(turn, NpcifyTurnStop.Rejected);
                     return;
                 }
-                if (change == NpcifyStreamChange.Failed)
+                switch (change)
                 {
-                    // The HTTP request fails too and reports the error.
-                    Note(turn, "the server stopped the turn");
-                    EndTurn(turn);
-                }
-                else if (change != NpcifyStreamChange.None)
-                {
-                    NoteMilestones(turn);
-                    PumpTurn(turn);
+                    case NpcifyStreamChange.None:
+                        return;
+                    case NpcifyStreamChange.Restarted:
+                        RestartTurn(turn, streamEvent);
+                        return;
+                    case NpcifyStreamChange.Failed:
+                        // The HTTP request fails too and reports the error.
+                        Note(turn, "the server stopped the turn");
+                        EndTurn(turn, NpcifyTurnStop.Failed);
+                        return;
+                    default:
+                        NoteMilestones(turn);
+                        PumpTurn(turn);
+                        return;
                 }
             }
         }
 
         private NpcifyStreamTurn FindTurn(string taskId)
         {
-            if (_playingTurn != null && _playingTurn.TaskId == taskId)
-            {
-                return _playingTurn;
-            }
             foreach (var turn in _turns)
             {
                 if (turn.TaskId == taskId)
@@ -252,7 +288,27 @@ namespace Npcify.Sdk.Character
                     return turn;
                 }
             }
-            return null;
+            return _playingTurn != null && _playingTurn.TaskId == taskId ? _playingTurn : null;
+        }
+
+        // A retried request: the server runs the turn again under the same task ID.
+        private void RestartTurn(NpcifyStreamTurn turn, Dictionary<string, object> startEvent)
+        {
+            if (turn.Sequence < _playedSequence)
+            {
+                // A newer reply plays already.
+                turn.Stop(NpcifyTurnStop.Superseded);
+                return;
+            }
+            if (_playingTurn == turn)
+            {
+                // The first run stops without OnSpeechEnd; the new run plays from its start.
+                _playingTurn = null;
+                _stagingPlayer.Stop();
+            }
+            turn.Restart(startEvent);
+            _thinking = true;
+            Note(turn, "the server runs the turn again");
         }
 
         // Prepares the audio of ready blocks, starts the playback once the first block can play,
@@ -270,7 +326,8 @@ namespace Npcify.Sdk.Character
             }
             if (!turn.PlaybackStarted)
             {
-                if (IsBlockReady(dialogue, 0) && (_playingTurn == null || _playingTurn.Sequence < turn.Sequence))
+                // A rerun of the reply that played last can play again.
+                if (IsBlockReady(dialogue, 0) && turn.Sequence >= _playedSequence)
                 {
                     StartStreamPlayback(turn);
                 }
@@ -296,17 +353,10 @@ namespace Npcify.Sdk.Character
 
         private void StartStreamPlayback(NpcifyStreamTurn turn)
         {
-            _playingTurn?.Stop();
-            foreach (var waiting in _turns)
-            {
-                if (waiting.Sequence < turn.Sequence)
-                {
-                    // An older reply that did not play yet never plays over this one.
-                    waiting.Stop();
-                }
-            }
-            _turns.RemoveAll(waiting => waiting == turn || waiting.Stopped);
+            StopPlayingTurn(NpcifyTurnStop.Superseded);
+            SupersedeOlderTurns(turn.Sequence);
             _playingTurn = turn;
+            _playedSequence = turn.Sequence;
             turn.MarkStarted();
             ForgetBlocksOutside(turn.Payload.Timeline.Dialogue);
             _thinking = false;
@@ -314,25 +364,71 @@ namespace Npcify.Sdk.Character
             Note(turn, "the streamed reply plays (" + turn.Payload.Timeline.Dialogue.Count + " block(s) published)");
             LoadStoredMotion(turn.Payload);
             OnSpeechStart?.Invoke(turn.Payload);
-            var dialogue = turn.Payload.Timeline.Dialogue;
-            _stagingPlayer.PlayStream(turn.Payload, index => IsBlockReady(dialogue, index));
+            if (_playingTurn != turn)
+            {
+                return;
+            }
+            _stagingPlayer.PlayStream(turn.Payload, index => IsBlockReady(turn.Payload.Timeline.Dialogue, index));
             if (turn.Complete)
             {
                 _stagingPlayer.CompleteStream();
             }
+            ForgetClosedTurns();
         }
 
-        // The turn plays no more: its playback stops without OnSpeechEnd.
-        private void EndTurn(NpcifyStreamTurn turn)
+        // Older replies never play (or play again) over a newer one.
+        private void SupersedeOlderTurns(long sequence)
         {
-            turn.Stop();
-            _turns.Remove(turn);
+            foreach (var older in _turns)
+            {
+                if (older.Sequence < sequence && older != _playingTurn)
+                {
+                    older.Stop(NpcifyTurnStop.Superseded);
+                }
+            }
+            ForgetClosedTurns();
+        }
+
+        // The playing reply stops. If it already played to its end and only waited for its
+        // options, its OnSpeechEnd fires now: the game heard the whole reply.
+        private void StopPlayingTurn(NpcifyTurnStop reason)
+        {
+            var turn = _playingTurn;
+            if (turn == null)
+            {
+                return;
+            }
+            _playingTurn = null;
+            var ended = turn.EndPending;
+            turn.Stop(reason);
+            _stagingPlayer.Stop();
+            ForgetClosedTurns();
+            if (ended)
+            {
+                OnSpeechEnd?.Invoke(turn.Payload);
+            }
+        }
+
+        // The turn plays no more; a reply that played to its end still gets its OnSpeechEnd.
+        private void EndTurn(NpcifyStreamTurn turn, NpcifyTurnStop reason)
+        {
             if (_playingTurn == turn)
             {
-                _playingTurn = null;
+                StopPlayingTurn(reason);
                 _thinking = false;
-                _stagingPlayer.Stop();
             }
+            else
+            {
+                turn.Stop(reason);
+            }
+            ForgetClosedTurns();
+        }
+
+        // A turn stays findable while its request is open: a retry can run it again, and its result
+        // never plays again over its stream.
+        private void ForgetClosedTurns()
+        {
+            _turns.RemoveAll(turn => turn.RequestClosed && (turn.Stopped || turn.PlaybackStarted));
         }
 
         private void StopStreamTurns()
@@ -341,10 +437,10 @@ namespace Npcify.Sdk.Character
             {
                 foreach (var turn in _turns)
                 {
-                    turn.Stop();
+                    turn.Stop(NpcifyTurnStop.Game);
                 }
                 _turns.Clear();
-                _playingTurn?.Stop();
+                _playingTurn?.Stop(NpcifyTurnStop.Game);
                 _playingTurn = null;
                 _blockPreparation.Cancel();
                 _blockPreparation.Dispose();
@@ -367,138 +463,6 @@ namespace Npcify.Sdk.Character
                 _playingTurn = null;
             }
             OnSpeechEnd?.Invoke(staging);
-        }
-
-        private void NoteMilestones(NpcifyStreamTurn turn)
-        {
-            var dialogue = turn.Payload.Timeline.Dialogue;
-            if (turn.Noted < 1 && turn.HasTimeline)
-            {
-                turn.Noted = 1;
-                Note(turn, "the first revision arrived");
-            }
-            if (turn.Noted < 2 && dialogue.Count > 0 && NpcifyStreamTurn.HasPlayableAudio(dialogue[0]))
-            {
-                turn.Noted = 2;
-                Note(turn, "the audio of the first block is complete");
-            }
-        }
-
-        // A note of the stream with the time since the turn request (OnStreamLog).
-        private void Note(NpcifyStreamTurn turn, string message)
-        {
-            var handler = OnStreamLog;
-            if (handler != null)
-            {
-                handler(string.Format(System.Globalization.CultureInfo.InvariantCulture, "Turn {0}: {1} after {2:F2} s.",
-                    turn.TaskId.Length > 8 ? turn.TaskId.Substring(0, 8) : turn.TaskId, message, turn.ElapsedSeconds));
-            }
-        }
-
-        private bool IsBlockReady(List<StagingDialogueBlock> dialogue, int index)
-        {
-            return index >= 0 && index < dialogue.Count &&
-                   _blockAudio.TryGetValue(dialogue[index], out var ready) && ready;
-        }
-
-        private void PrepareBlock(StagingDialogueBlock block)
-        {
-            if (block == null || _blockAudio.ContainsKey(block) || !NpcifyStreamTurn.HasPlayableAudio(block))
-            {
-                return;
-            }
-            var preparer = BlockAudioPreparer;
-            var audio = block.Audio;
-            var encoded = block.Type == "speech" && audio != null && audio.Type != "silent" &&
-                          ((audio.Data != null && audio.Data.Length > 0) || !string.IsNullOrWhiteSpace(audio.Url));
-            if (preparer == null || !encoded)
-            {
-                _blockAudio[block] = true;
-                return;
-            }
-            var token = _blockPreparation.Token;
-            Task preparation;
-            try
-            {
-                preparation = preparer(block, token) ?? Task.CompletedTask;
-            }
-            catch (Exception error)
-            {
-                preparation = Task.FromException(error);
-            }
-            if (preparation.IsCompleted)
-            {
-                // Ready now; the caller starts or continues the playback.
-                ReportPreparationFailure(preparation);
-                _blockAudio[block] = true;
-                return;
-            }
-            _blockAudio[block] = false;
-            _ = FinishPreparationAsync(preparation, block, token);
-        }
-
-        private void ReportPreparationFailure(Task preparation)
-        {
-            if (preparation.IsFaulted && preparation.Exception != null)
-            {
-                // Missing audio must not stop the reply: the block plays its text and timeline.
-                var error = preparation.Exception.GetBaseException();
-                _mainThreadWork.Enqueue(() => OnError?.Invoke(error));
-            }
-        }
-
-        private async Task FinishPreparationAsync(Task preparation, StagingDialogueBlock block, CancellationToken cancellationToken)
-        {
-            try
-            {
-                await preparation;
-            }
-            catch (Exception)
-            {
-                if (cancellationToken.IsCancellationRequested)
-                {
-                    return;
-                }
-                ReportPreparationFailure(preparation);
-            }
-            lock (_playbackGate)
-            {
-                if (cancellationToken.IsCancellationRequested || !_blockAudio.ContainsKey(block))
-                {
-                    return;
-                }
-                _blockAudio[block] = true;
-                if (_playingTurn != null)
-                {
-                    PumpTurn(_playingTurn);
-                }
-                foreach (var turn in _turns.ToArray())
-                {
-                    PumpTurn(turn);
-                }
-            }
-        }
-
-        // Readiness of blocks that no reply in progress plays.
-        private void ForgetBlocksOutside(List<StagingDialogueBlock> dialogue)
-        {
-            var keep = new HashSet<StagingDialogueBlock>(dialogue);
-            foreach (var turn in _turns)
-            {
-                keep.UnionWith(turn.Payload.Timeline.Dialogue);
-            }
-            var stale = new List<StagingDialogueBlock>();
-            foreach (var block in _blockAudio.Keys)
-            {
-                if (!keep.Contains(block))
-                {
-                    stale.Add(block);
-                }
-            }
-            foreach (var block in stale)
-            {
-                _blockAudio.Remove(block);
-            }
         }
     }
 }

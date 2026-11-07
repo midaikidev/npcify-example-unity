@@ -17,6 +17,25 @@ namespace Npcify.Sdk.Character
         Audio,
         Final,
         Failed,
+        /// <summary>A second start event: the server runs the turn again (a retried request).</summary>
+        Restarted,
+    }
+
+    /// <summary>
+    /// Why a turn plays no more. Game and Superseded are final; after Rejected or Failed, a rerun
+    /// of the turn (a retried request) can start it again.
+    /// </summary>
+    internal enum NpcifyTurnStop
+    {
+        None,
+        /// <summary>The game stopped the speech (StopSpeaking, a new conversation, a cancelled task).</summary>
+        Game,
+        /// <summary>A newer reply plays, or the HTTP result plays as a whole.</summary>
+        Superseded,
+        /// <summary>The SDK refused a revision that changed published dialogue.</summary>
+        Rejected,
+        /// <summary>The server sent an error event, or the request failed.</summary>
+        Failed,
     }
 
     /// <summary>
@@ -41,15 +60,23 @@ namespace Npcify.Sdk.Character
         private static long _nextSequence;
         private readonly System.Diagnostics.Stopwatch _clock = System.Diagnostics.Stopwatch.StartNew();
         private readonly Dictionary<string, AudioStream> _audio = new Dictionary<string, AudioStream>(StringComparer.Ordinal);
-        private readonly TaskCompletionSource<bool> _started =
+        private TaskCompletionSource<bool> _started =
             new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         private long _revision;
+        // A start event arrived: a later one means that the server runs the turn again.
+        private bool _runStarted;
 
         public NpcifyStreamTurn(string taskId)
         {
             TaskId = (taskId ?? string.Empty).Trim().ToLowerInvariant();
-            Sequence = Interlocked.Increment(ref _nextSequence);
+            Sequence = NextSequence();
             Payload = new StagingResultPayload { ProtocolVersion = 1, TaskId = TaskId };
+        }
+
+        /// <summary>The order of turn requests: later requests have higher numbers.</summary>
+        public static long NextSequence()
+        {
+            return Interlocked.Increment(ref _nextSequence);
         }
 
         /// <summary>The Idempotency-Key of the turn request; the server uses it as the task ID.</summary>
@@ -73,12 +100,18 @@ namespace Npcify.Sdk.Character
         /// <summary>The options and the text are known (the options event or the HTTP result).</summary>
         public bool HasFinal { get; private set; }
 
-        public bool Failed { get; private set; }
+        /// <summary>Why the turn plays no more (None: it can still play).</summary>
+        public NpcifyTurnStop StopReason { get; private set; }
+
+        /// <summary>The turn plays no more: stopped, replaced by a newer reply, refused or failed.</summary>
+        public bool Stopped => StopReason != NpcifyTurnStop.None;
+
+        public bool Failed => StopReason == NpcifyTurnStop.Failed || StopReason == NpcifyTurnStop.Rejected;
 
         public bool PlaybackStarted { get; private set; }
 
-        /// <summary>The turn plays no more: stopped, replaced by a newer reply, or failed.</summary>
-        public bool Stopped { get; private set; }
+        /// <summary>The HTTP request of the turn finished (a result or a failure).</summary>
+        public bool RequestClosed { get; set; }
 
         /// <summary>The playback ended before the options were known; OnSpeechEnd waits for them.</summary>
         public bool EndPending { get; set; }
@@ -91,11 +124,24 @@ namespace Npcify.Sdk.Character
 
         public NpcifyStreamChange Apply(Dictionary<string, object> streamEvent)
         {
-            if (Stopped || streamEvent == null)
+            if (streamEvent == null)
             {
                 return NpcifyStreamChange.None;
             }
-            switch (GetString(streamEvent, "type"))
+            var type = GetString(streamEvent, "type");
+            var rerun = type == "start" && _runStarted;
+            // Each run of the turn sends its start event first.
+            _runStarted = true;
+            if (rerun && !IsFinalStop(StopReason))
+            {
+                // A retried request runs the turn again under the same task ID.
+                return NpcifyStreamChange.Restarted;
+            }
+            if (Stopped)
+            {
+                return NpcifyStreamChange.None;
+            }
+            switch (type)
             {
                 case "start":
                     AdoptStagingId(streamEvent);
@@ -117,7 +163,7 @@ namespace Npcify.Sdk.Character
                 case "options":
                     return ApplyOptions(streamEvent);
                 case "error":
-                    Fail();
+                    Stop(NpcifyTurnStop.Failed);
                     return NpcifyStreamChange.Failed;
                 default:
                     return NpcifyStreamChange.None;
@@ -125,13 +171,24 @@ namespace Npcify.Sdk.Character
         }
 
         /// <summary>
-        /// Applies the HTTP result. Returns false when no revision arrived: the result then plays
-        /// as a whole. Speech whose stream did not complete takes the stored audio of the result.
-        /// Throws InvalidDataException when the result changes published dialogue.
+        /// Applies the HTTP result. Returns false when the result plays as a whole: no revision
+        /// arrived, or the server failed the stream (a rerun whose events did not arrive). A turn
+        /// that the game stopped or that a newer reply replaced does not play again: it takes the
+        /// complete staging of the result. Speech whose stream did not complete takes the stored
+        /// audio of the result. Throws InvalidDataException when the result changes published
+        /// dialogue, or when the SDK refused a revision of this turn.
         /// </summary>
         public bool ApplyResult(StagingResultPayload result)
         {
-            if (result == null || !HasTimeline)
+            if (result == null)
+            {
+                return false;
+            }
+            if (StopReason == NpcifyTurnStop.Rejected)
+            {
+                throw new InvalidDataException(ChangedDialogueMessage);
+            }
+            if (StopReason == NpcifyTurnStop.Failed || (!HasTimeline && !Stopped))
             {
                 return false;
             }
@@ -143,6 +200,8 @@ namespace Npcify.Sdk.Character
             HasFinal = true;
             if (Stopped)
             {
+                Payload.Timeline = result.Timeline ?? new StagingTimeline();
+                Complete = true;
                 return true;
             }
             var dialogue = Payload.Timeline.Dialogue;
@@ -180,23 +239,72 @@ namespace Npcify.Sdk.Character
             return (audio.Data != null && audio.Data.Length > 0) || !string.IsNullOrWhiteSpace(audio.Url);
         }
 
+        /// <summary>All blocks are known and can play: the stream delivered the whole reply.</summary>
+        public bool AllBlocksPlayable
+        {
+            get
+            {
+                foreach (var block in Payload.Timeline.Dialogue)
+                {
+                    if (!HasPlayableAudio(block))
+                    {
+                        return false;
+                    }
+                }
+                return Complete;
+            }
+        }
+
         public void MarkStarted()
         {
             PlaybackStarted = true;
             _started.TrySetResult(true);
         }
 
-        public void Stop()
+        public void Stop(NpcifyTurnStop reason)
         {
-            Stopped = true;
+            if (reason != NpcifyTurnStop.None && (!IsFinalStop(StopReason) || reason == NpcifyTurnStop.Game))
+            {
+                StopReason = reason;
+            }
             EndPending = false;
             _started.TrySetResult(PlaybackStarted);
         }
 
-        public void Fail()
+        private static bool IsFinalStop(NpcifyTurnStop reason)
         {
-            Failed = true;
-            Stop();
+            return reason == NpcifyTurnStop.Game || reason == NpcifyTurnStop.Superseded;
+        }
+
+        /// <summary>
+        /// The server runs the turn again (a retried request): the turn forgets the first run and
+        /// applies the new run from its start event, in the same staging object.
+        /// </summary>
+        public void Restart(Dictionary<string, object> startEvent)
+        {
+            _audio.Clear();
+            _revision = 0;
+            _runStarted = true;
+            HasTimeline = false;
+            Complete = false;
+            HasFinal = false;
+            PlaybackStarted = false;
+            EndPending = false;
+            Noted = 0;
+            StopReason = NpcifyTurnStop.None;
+            if (_started.Task.IsCompleted)
+            {
+                _started = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            }
+            Payload.TaskId = TaskId;
+            Payload.StagingId = string.Empty;
+            Payload.Text = string.Empty;
+            Payload.Options = new List<StagingReplyOption>();
+            Payload.Timeline = new StagingTimeline();
+            if (startEvent != null)
+            {
+                AdoptStagingId(startEvent);
+            }
         }
 
         private void AdoptStagingId(Dictionary<string, object> streamEvent)
@@ -402,7 +510,7 @@ namespace Npcify.Sdk.Character
             }
             if (!valid)
             {
-                Fail();
+                Stop(NpcifyTurnStop.Rejected);
                 throw new InvalidDataException(ChangedDialogueMessage);
             }
             for (var index = 0; index < dialogue.Count; index++)

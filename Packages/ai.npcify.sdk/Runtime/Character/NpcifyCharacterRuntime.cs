@@ -449,8 +449,7 @@ namespace Npcify.Sdk.Character
             lock (_playbackGate)
             {
                 // A staging played as a whole replaces a streamed reply.
-                _playingTurn?.Stop();
-                _playingTurn = null;
+                StopPlayingTurn(NpcifyTurnStop.Superseded);
                 _thinking = false;
                 _activeStagingId = staging.StagingId;
                 LoadStoredMotion(staging);
@@ -490,8 +489,8 @@ namespace Npcify.Sdk.Character
             lock (_playbackGate)
             {
                 _thinking = false;
-                _playingTurn?.Stop();
-                _playingTurn = null;
+                // A reply that played to its end and waits for its options still ends.
+                StopPlayingTurn(NpcifyTurnStop.Game);
                 _stagingPlayer.Stop();
             }
         }

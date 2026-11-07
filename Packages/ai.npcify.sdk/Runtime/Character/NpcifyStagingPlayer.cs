@@ -9,9 +9,11 @@ namespace Npcify.Sdk.Character
     {
         private readonly NpcifyFacialMixer _facialMixer;
         private readonly NpcifyVisemePlayer _visemePlayer;
-        private readonly HashSet<string> _triggeredExpressionIds = new HashSet<string>(StringComparer.Ordinal);
-        private readonly HashSet<string> _triggeredAnimationIds = new HashSet<string>(StringComparer.Ordinal);
+        private readonly NpcifyPlayedClips _playedExpressions = new NpcifyPlayedClips();
+        private readonly NpcifyPlayedClips _playedAnimations = new NpcifyPlayedClips();
         private readonly StringBuilder _revealedBuilder = new StringBuilder();
+        // The block that plays had no character timing when it started: all of its text shows.
+        private bool _wholeTextRevealed;
 
         private StagingResultPayload _staging;
         private int _currentBlockIndex = -1;
@@ -132,14 +134,14 @@ namespace Npcify.Sdk.Character
             {
                 if (clip != null && clip.EndTime <= _timelineElapsedSeconds)
                 {
-                    _triggeredExpressionIds.Add(ClipKey(clip.Id, clip.Expression, clip.StartTime));
+                    _playedExpressions.Add(clip.Id, clip.Expression, clip.StartTime, clip.EndTime);
                 }
             }
             foreach (var clip in timeline.Animations ?? new List<StagingAnimationClip>())
             {
                 if (clip != null && clip.EndTime <= _timelineElapsedSeconds)
                 {
-                    _triggeredAnimationIds.Add(ClipKey(clip.Id, clip.Animation, clip.StartTime));
+                    _playedAnimations.Add(clip.Id, clip.Animation, clip.StartTime, clip.EndTime);
                 }
             }
         }
@@ -155,9 +157,10 @@ namespace Npcify.Sdk.Character
             _isBlockReady = isBlockReady;
             _dialogueComplete = dialogueComplete;
             _waitingBlockIndex = -1;
-            _triggeredExpressionIds.Clear();
-            _triggeredAnimationIds.Clear();
+            _playedExpressions.Clear();
+            _playedAnimations.Clear();
             _revealedBuilder.Clear();
+            _wholeTextRevealed = false;
             _timelineElapsedSeconds = 0.0;
             _blockElapsedSeconds = 0.0;
             _currentBlockIndex = -1;
@@ -260,6 +263,7 @@ namespace Npcify.Sdk.Character
             _blockElapsedSeconds = 0.0;
             _nextCharCueIndex = 0;
             _revealedBuilder.Clear();
+            _wholeTextRevealed = false;
 
             var block = dialogue[index];
             _visemePlayer.LoadCues(block.Visemes);
@@ -268,7 +272,9 @@ namespace Npcify.Sdk.Character
             {
                 if (!string.IsNullOrEmpty(block.Text))
                 {
+                    // Character timing that a later revision adds does not show the text again.
                     _revealedBuilder.Append(block.Text);
+                    _wholeTextRevealed = true;
                 }
             }
 
@@ -349,15 +355,9 @@ namespace Npcify.Sdk.Character
             return false;
         }
 
-        private static string ClipKey(string id, string name, double startTime)
-        {
-            // Not the list index: a revision can add a clip in front of clips that played.
-            return !string.IsNullOrEmpty(id) ? id : $"{name}:{startTime:F3}";
-        }
-
         private void EvaluateCharacterCues(StagingDialogueBlock block)
         {
-            if (block.Characters == null || block.Characters.Count == 0)
+            if (_wholeTextRevealed || block.Characters == null || block.Characters.Count == 0)
             {
                 return;
             }
@@ -392,6 +392,8 @@ namespace Npcify.Sdk.Character
             {
                 return;
             }
+            // Revisions of a streamed staging can move clips that played.
+            var streamed = _isBlockReady != null;
 
             if (timeline.Expressions != null)
             {
@@ -403,11 +405,10 @@ namespace Npcify.Sdk.Character
                         continue;
                     }
 
-                    var clipKey = ClipKey(clip.Id, clip.Expression, clip.StartTime);
-
-                    if (!_triggeredExpressionIds.Contains(clipKey) && timelineSeconds + 1e-6 >= clip.StartTime)
+                    if (timelineSeconds + 1e-6 >= clip.StartTime &&
+                        !_playedExpressions.Contains(clip.Id, clip.Expression, clip.StartTime, clip.EndTime, streamed))
                     {
-                        _triggeredExpressionIds.Add(clipKey);
+                        _playedExpressions.Add(clip.Id, clip.Expression, clip.StartTime, clip.EndTime);
                         // A clip that a revision added after its start plays for the rest of its time.
                         var duration = Math.Max(0.15f, (float)(clip.EndTime - Math.Max(clip.StartTime, timelineSeconds)));
                         var weight = clip.Weight <= 0.0 ? 1f : (float)clip.Weight;
@@ -427,11 +428,10 @@ namespace Npcify.Sdk.Character
                         continue;
                     }
 
-                    var clipKey = ClipKey(clip.Id, clip.Animation, clip.StartTime);
-
-                    if (!_triggeredAnimationIds.Contains(clipKey) && timelineSeconds + 1e-6 >= clip.StartTime)
+                    if (timelineSeconds + 1e-6 >= clip.StartTime &&
+                        !_playedAnimations.Contains(clip.Id, clip.Animation, clip.StartTime, clip.EndTime, streamed))
                     {
-                        _triggeredAnimationIds.Add(clipKey);
+                        _playedAnimations.Add(clip.Id, clip.Animation, clip.StartTime, clip.EndTime);
                         OnAnimationClipTriggered?.Invoke(clip);
                     }
                 }
