@@ -23,6 +23,10 @@ namespace NpcifyDemo
         private double _finalEnd;
         private float _clipLength;
         private double _firstCue = -1.0;
+        // The block audio length that the SDK gives the runtime, and the start of the block on the
+        // staging clock after its start on the server (both 0 when not known).
+        private double _sdkLength;
+        private double _startOffset;
 
         public void Sample(NpcifyCharacterRuntime runtime, AudioSource source, Action<string> log)
         {
@@ -32,10 +36,18 @@ namespace NpcifyDemo
             {
                 Report(log);
                 Begin(block);
+                if (block != null)
+                {
+                    _startOffset = player.TimelineElapsedSeconds - player.BlockElapsedSeconds - block.StartTime;
+                }
             }
             if (_block == null || _block.Type != "speech")
             {
                 return;
+            }
+            if (_sdkLength <= 0.0 && runtime.BlockAudioLength != null)
+            {
+                _sdkLength = runtime.BlockAudioLength(_block);
             }
             var playing = source != null && source.isPlaying && source.clip != null;
             if (playing && _clipLength <= 0f)
@@ -80,6 +92,8 @@ namespace NpcifyDemo
             _finalEnd = _estimate;
             _clipLength = 0f;
             _firstCue = -1.0;
+            _sdkLength = 0.0;
+            _startOffset = 0.0;
         }
 
         private void Report(Action<string> log)
@@ -115,6 +129,10 @@ namespace NpcifyDemo
                 _block.Id, _pendingAtStart, _estimate, _clipLength,
                 _finalAt < 0.0 ? "none" : _finalAt.ToString("F3", c) + " s of the audio", _finalEnd, before, after,
                 _firstCue < 0.0 ? "none" : string.Format(c, "at {0:F3} s, lag {1:F3} s", _firstCue, cueLag)));
+            log(string.Format(c,
+                "clock probe: block {0} audio length of the SDK {1:F6} s ({2:+0.0;-0.0;0.0} ms after the final end {3:F5} s), clip {4:F3} s; " +
+                "start on the staging clock {5:+0.0;-0.0;0.0} ms after its server start {6:F5} s",
+                _block.Id, _sdkLength, (_sdkLength - _finalEnd) * 1000.0, _finalEnd, _clipLength, _startOffset * 1000.0, _block.StartTime));
         }
     }
 }
