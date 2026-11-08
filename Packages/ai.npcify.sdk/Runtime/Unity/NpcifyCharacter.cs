@@ -43,8 +43,8 @@ namespace Npcify.Sdk.Unity
         private readonly List<Material> _materials = new List<Material>();
         private readonly float[] _audioSampleBuffer = new float[256];
 
-        private readonly Dictionary<StagingDialogueBlock, AudioClip> _preparedClips =
-            new Dictionary<StagingDialogueBlock, AudioClip>();
+        private readonly Dictionary<StagingDialogueBlock, SpeechClip> _preparedClips =
+            new Dictionary<StagingDialogueBlock, SpeechClip>();
 
         private NpcifyCharacterRuntime _runtime;
         private AudioClip _activeDynamicClip;
@@ -450,7 +450,7 @@ namespace Npcify.Sdk.Unity
                 return;
             }
 
-            if (_preparedClips.TryGetValue(block, out var prepared) && prepared != null)
+            if (_preparedClips.TryGetValue(block, out var prepared) && prepared?.Clip != null)
             {
                 PlayClip(prepared, 0f);
                 return;
@@ -474,7 +474,7 @@ namespace Npcify.Sdk.Unity
                     false
                 );
                 _activeDynamicClip.SetData(decodedAudio.Samples, 0);
-                PlayClip(_activeDynamicClip, 0f);
+                PlayClip(new SpeechClip(_activeDynamicClip, 0, lengthSamples), 0f);
                 return;
             }
 
@@ -490,16 +490,16 @@ namespace Npcify.Sdk.Unity
         {
             try
             {
-                var clip = await LoadEncodedClipAsync(block.Audio, CancellationToken.None);
-                if (clip == null || this == null)
+                var speech = await LoadEncodedClipAsync(block.Audio, CancellationToken.None);
+                if (speech == null || this == null)
                 {
                     return;
                 }
-                _preparedClips[block] = clip;
+                _preparedClips[block] = speech;
                 var cursor = _runtime?.StagingPlayer;
                 if (cursor != null && cursor.IsPlaying && cursor.CurrentBlock == block)
                 {
-                    PlayClip(clip, (float)cursor.BlockElapsedSeconds);
+                    PlayClip(speech, cursor.BlockElapsedSeconds);
                 }
             }
             catch (Exception ex)
@@ -517,16 +517,20 @@ namespace Npcify.Sdk.Unity
             }
         }
 
-        private void PlayClip(AudioClip clip, float offsetSeconds)
+        // Plays the speech of a clip from a block time; a block time after its end plays nothing.
+        private void PlayClip(SpeechClip speech, double offsetSeconds)
         {
+            var clip = speech.Clip;
             audioSourceComponent.Stop();
+            var offset = offsetSeconds > 0.0 ? (long)Math.Round(offsetSeconds * clip.frequency) : 0L;
+            if (offset >= speech.Samples)
+            {
+                return;
+            }
             audioSourceComponent.mute = _runtime.Muted;
             audioSourceComponent.volume = _runtime.Volume;
             audioSourceComponent.clip = clip;
-            if (offsetSeconds > 0f && offsetSeconds < clip.length)
-            {
-                audioSourceComponent.time = offsetSeconds;
-            }
+            audioSourceComponent.timeSamples = speech.StartSample + (int)offset;
             audioSourceComponent.Play();
         }
 
@@ -548,10 +552,10 @@ namespace Npcify.Sdk.Unity
                 }
                 try
                 {
-                    var clip = await LoadEncodedClipAsync(block.Audio, cancellationToken);
-                    if (clip != null)
+                    var speech = await LoadEncodedClipAsync(block.Audio, cancellationToken);
+                    if (speech != null)
                     {
-                        _preparedClips[block] = clip;
+                        _preparedClips[block] = speech;
                     }
                 }
                 catch (OperationCanceledException)
@@ -593,7 +597,7 @@ namespace Npcify.Sdk.Unity
             return AudioType.MPEG;
         }
 
-        private static async Task<AudioClip> LoadEncodedClipAsync(StagingAudioSource audio, CancellationToken cancellationToken)
+        private static async Task<SpeechClip> LoadEncodedClipAsync(StagingAudioSource audio, CancellationToken cancellationToken)
         {
             var audioType = ResolveAudioType(audio);
             string tempPath = null;
@@ -628,11 +632,13 @@ namespace Npcify.Sdk.Unity
                         throw new IOException($"Npcify audio download failed: {request.error}");
                     }
                     var clip = handler.audioClip;
-                    if (clip != null)
+                    if (clip == null)
                     {
-                        clip.name = "npcify-speech";
+                        return null;
                     }
-                    return clip;
+                    clip.name = "npcify-speech";
+                    var mp3 = audioType != AudioType.MPEG ? null : tempPath != null ? audio.Data : DownloadedBytes(handler);
+                    return FindSpeech(clip, mp3);
                 }
             }
             finally
@@ -667,7 +673,7 @@ namespace Npcify.Sdk.Unity
             }
             for (var i = 0; i < stale.Count; i++)
             {
-                var clip = _preparedClips[stale[i]];
+                var clip = _preparedClips[stale[i]]?.Clip;
                 _preparedClips.Remove(stale[i]);
                 if (clip != null)
                 {

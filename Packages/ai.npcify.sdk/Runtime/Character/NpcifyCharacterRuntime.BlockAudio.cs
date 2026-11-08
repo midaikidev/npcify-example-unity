@@ -32,7 +32,9 @@ namespace Npcify.Sdk.Character
         /// alignment, and its final version ends it at the end of its timing. Without a length, the
         /// clock waits at the estimated end of a pending block until its final version. The runtime
         /// asks once per block, on the thread that calls Tick, and measures WAV and PCM audio
-        /// itself. NpcifyCharacter sets it (AudioClip.length).
+        /// itself. For MP3 audio, give the length of the MP3 audio, not of the decoder output.
+        /// NpcifyCharacter sets it: the length of the MP3 audio in the AudioClip, without the
+        /// samples that Unity's decoder adds.
         /// </summary>
         public Func<StagingDialogueBlock, double> BlockAudioLength { get; set; }
 

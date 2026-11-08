@@ -33,14 +33,14 @@ Add the Npcify scoped registry and `ai.npcify.sdk` to `Packages/manifest.json`:
     }
   ],
   "dependencies": {
-    "ai.npcify.sdk": "0.6.1"
+    "ai.npcify.sdk": "0.6.2"
   }
 }
 ```
 
 ### Option 2: Download `.tgz` Tarball
 
-Download the latest UPM package tarball from `https://npcify.ai/sdk/unity/latest` (or a specific version from `https://npcify.ai/sdk/unity/app/0.6.1`), then in Unity open **Window > Package Manager > + > Install package from tarball...** and select the downloaded `ai.npcify.sdk-0.6.1.tgz` file.
+Download the latest UPM package tarball from `https://npcify.ai/sdk/unity/latest` (or a specific version from `https://npcify.ai/sdk/unity/app/0.6.2`), then in Unity open **Window > Package Manager > + > Install package from tarball...** and select the downloaded `ai.npcify.sdk-0.6.2.tgz` file.
 
 ## Quick Start (3D Game Integration)
 
@@ -98,6 +98,13 @@ public sealed class NpcifyGameExample : MonoBehaviour
   with `UnityWebRequestMultimedia` before the block or the staging starts, so
   audio, visemes and the typewriter text start together. WAV and raw PCM bytes
   still decode in C#.
+- Unity's MP3 decoder makes clips that are longer than their MP3 audio: zero
+  samples after the last frame (2 to 7 frames, 52 to 183 ms, for replies of 3
+  to 15 s). For an MP3 with a LAME tag, the clip also starts with a silent tag
+  frame and the encoder delay (2257 samples, 51 ms at 44.1 kHz). Since 0.6.2
+  `NpcifyCharacter` reads the frames of the MP3 bytes and plays and measures
+  only the samples of the MP3 audio, as minimp3, FFmpeg and the server count
+  them. The `AudioClip` keeps all samples of the decoder.
 - The async methods (`CreateConversationAsync`, `SpeakAsync`, `ReplyAsync`,
   `StartBakedConversationAsync`) resume on the caller's synchronization context,
   that is the Unity main thread.
@@ -126,8 +133,8 @@ a gap and without a repeated block.
   block whose chunks did not arrive plays the stored audio of the HTTP result.
 - **Clock:** while the server aligns the last block, its estimated end can come
   before the end of its audio. The block then plays to the end of its decoded
-  audio (the `AudioClip` length): the staging clock, and with it the live motion
-  frames, runs on with the voice. The part without lip-sync has a neutral mouth
+  audio (the length of its MP3 audio, not of the `AudioClip`): the staging
+  clock, and with it the live motion frames, runs on with the voice. The part without lip-sync has a neutral mouth
   until a later revision adds its visemes and text timing at the current time.
   At the end of its audio, a block that is not final waits for its final
   version, which ends it at its end time; when the clock already passed that
@@ -155,8 +162,9 @@ a gap and without a repeated block.
   playback of each streamed reply came, and the audio length of a pending block.
 - **Own integrations:** a runtime with a `StagingPreparer` but no
   `BlockAudioPreparer` plays each reply after its HTTP result, as before. A host
-  that decodes the audio gives its length with `Runtime.BlockAudioLength`; the
-  runtime measures WAV and PCM audio itself. Without a length, the clock of a
+  that decodes the audio gives its length with `Runtime.BlockAudioLength`: for
+  MP3, the length of the MP3 audio, not of the decoder output (Unity's decoder
+  adds samples). The runtime measures WAV and PCM audio itself. Without a length, the clock of a
   pending block waits at its estimated end. A host
   that plays the audio itself stops the voice of the current block on
   `Runtime.OnSpeechStopped` (the runtime stopped the reply: a failed turn, a

@@ -30,23 +30,24 @@ namespace Npcify.Sdk.Unity
             {
                 return;
             }
-            var clip = await LoadEncodedClipAsync(block.Audio, cancellationToken);
-            if (clip == null)
+            var speech = await LoadEncodedClipAsync(block.Audio, cancellationToken);
+            if (speech == null)
             {
                 return;
             }
             if (this == null || cancellationToken.IsCancellationRequested)
             {
-                Destroy(clip);
+                Destroy(speech.Clip);
                 return;
             }
-            _preparedClips[block] = clip;
+            _preparedClips[block] = speech;
         }
 
-        // The length of the decoded clip of a block: a block of a streamed reply plays to its end.
+        // The length of the speech in the decoded clip of a block: a block of a streamed reply plays
+        // to its end. For MP3 audio it is the length of the MP3 audio, as the server counts it.
         private double PreparedClipLength(StagingDialogueBlock block)
         {
-            return block != null && _preparedClips.TryGetValue(block, out var clip) && clip != null ? clip.length : 0.0;
+            return block != null && _preparedClips.TryGetValue(block, out var speech) && speech?.Clip != null ? speech.Seconds : 0.0;
         }
 
         // A staging that starts to play releases the clips of other stagings.
