@@ -154,6 +154,7 @@ namespace Npcify.Sdk.Api
 
         public bool IsJoined(string conversationId)
         {
+            conversationId = Normalize(conversationId);
             lock (_gate)
             {
                 return conversationId != null && _joinedConversationId == conversationId && _connection != null && !_connection.Closed;
@@ -163,6 +164,7 @@ namespace Npcify.Sdk.Api
         /// <summary>The last join of this conversation failed and no join succeeded since.</summary>
         public bool IsFailing(string conversationId)
         {
+            conversationId = Normalize(conversationId);
             lock (_gate)
             {
                 return conversationId != null && _failedConversationId == conversationId &&
@@ -176,10 +178,16 @@ namespace Npcify.Sdk.Api
         /// </summary>
         public bool IsRefused(string conversationId)
         {
+            conversationId = Normalize(conversationId);
             lock (_gate)
             {
                 return conversationId != null && _refusedConversationId == conversationId;
             }
+        }
+
+        private static string Normalize(string conversationId)
+        {
+            return string.IsNullOrWhiteSpace(conversationId) ? null : conversationId.Trim();
         }
 
         /// <summary>The Socket.IO URL of an API base URL (its origin; the path is not used).</summary>
@@ -197,7 +205,9 @@ namespace Npcify.Sdk.Api
         /// </summary>
         public async Task<bool> JoinAsync(string conversationId, CancellationToken cancellationToken = default)
         {
-            if (string.IsNullOrWhiteSpace(conversationId))
+            // The server trims the ID and names that one in a refusal: send and compare that one.
+            conversationId = Normalize(conversationId);
+            if (conversationId == null)
             {
                 return false;
             }

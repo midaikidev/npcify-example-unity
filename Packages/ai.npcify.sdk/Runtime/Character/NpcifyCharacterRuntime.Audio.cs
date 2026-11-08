@@ -128,7 +128,8 @@ namespace Npcify.Sdk.Character
                     (bytes[offset + 7] << 24);
                 offset += 8;
 
-                if (chunkSize < 0 || offset + chunkSize > bytes.Length)
+                // A size past the end of the bytes (also one near int.MaxValue) ends the walk.
+                if (chunkSize < 0 || chunkSize > bytes.Length - offset)
                 {
                     break;
                 }
