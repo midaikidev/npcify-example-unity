@@ -79,8 +79,14 @@ typewriter text) and writes the face blend shapes of the VRM model.
   talk key and when the reply field gets focus, so that the first reply does
   not wait for the GPU. A character without live motion plays its animation
   clips.
+- **Sight.** When the owner of the online character turns **sight** on in its
+  Sight tab, the NPC sees the game: after the conversation starts, the game
+  calls `StartSight` with the main camera, and the SDK sends a frame of the
+  screen every 5 s and when the picture changes. The character reads what it
+  saw in its next reply. The owner pays each frame. The end of the
+  conversation stops sight.
 
-The Npcify Unity SDK is in `Packages/ai.npcify.sdk` (version 0.5.0).
+The Npcify Unity SDK is in `Packages/ai.npcify.sdk` (version 0.7.0).
 
 ### Anime look
 

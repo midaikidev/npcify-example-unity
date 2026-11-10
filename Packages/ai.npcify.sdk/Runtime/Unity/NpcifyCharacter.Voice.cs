@@ -231,6 +231,7 @@ namespace Npcify.Sdk.Unity
             {
                 CancelPushToTalk();
             }
+            PauseSight(paused);
         }
 
         private void UpdateVoiceInput()

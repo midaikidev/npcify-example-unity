@@ -440,6 +440,7 @@ namespace Npcify.Sdk.Unity
             _runtime.OnAnimationPlayRequested += HandleAnimationPlayRequested;
             _runtime.OnError += ex => OnError?.Invoke(ex);
             _runtime.OnTranscript += transcript => TranscriptReceived?.Invoke(transcript.Text);
+            BindSight();
             BindLiveMotionTarget();
         }
 

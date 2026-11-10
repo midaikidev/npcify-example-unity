@@ -62,6 +62,10 @@ namespace Npcify.Sdk.Models
         public int BakedConversationRevision;
         /// <summary>The character's body motion is generated live in each turn (false on older servers).</summary>
         public bool RealtimeMotionEnabled;
+        /// <summary>The owner turned sight on and chose a provider (the Sight tab; false on older servers).</summary>
+        public bool SightEnabled;
+        /// <summary>The vision provider of sight ("gemini" or "openai"), or null.</summary>
+        public string SightProvider;
     }
 
     [Serializable]

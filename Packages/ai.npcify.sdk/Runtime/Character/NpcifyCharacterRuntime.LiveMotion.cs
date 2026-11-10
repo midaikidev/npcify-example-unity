@@ -137,6 +137,7 @@ namespace Npcify.Sdk.Character
             {
                 _stream = _streamFactory();
                 _stream.StreamEvent += HandleStreamEvent;
+                _stream.SightObservation += HandleSightObservation;
                 _stream.Log += message => _mainThreadWork.Enqueue(() => OnStreamLog?.Invoke(message));
             }
             try

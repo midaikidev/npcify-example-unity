@@ -24,6 +24,9 @@ namespace Npcify.Sdk.Api
 
         Task SendTextAsync(string text, CancellationToken cancellationToken);
 
+        /// <summary>One binary message: the attachment of a binary Socket.IO event.</summary>
+        Task SendBinaryAsync(byte[] data, CancellationToken cancellationToken);
+
         /// <summary>One complete message, or null when the connection closed.</summary>
         Task<NpcifySocketMessage> ReceiveAsync(CancellationToken cancellationToken);
 
@@ -47,6 +50,11 @@ namespace Npcify.Sdk.Api
         {
             var bytes = System.Text.Encoding.UTF8.GetBytes(text);
             return _socket.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, cancellationToken);
+        }
+
+        public Task SendBinaryAsync(byte[] data, CancellationToken cancellationToken)
+        {
+            return _socket.SendAsync(new ArraySegment<byte>(data), WebSocketMessageType.Binary, true, cancellationToken);
         }
 
         public async Task<NpcifySocketMessage> ReceiveAsync(CancellationToken cancellationToken)
@@ -92,9 +100,10 @@ namespace Npcify.Sdk.Api
     /// The conversation stream of the server (<c>conversations:stream</c> over Socket.IO): the
     /// SDK joins the room of its conversation before a turn, so that the streamed reply and the
     /// live motion frames reach it while the server generates the turn. It reconnects after a
-    /// lost connection and joins the conversation again. Events arrive on a background thread.
+    /// lost connection and joins the conversation again. Sight frames go on the same connection
+    /// (NpcifyConversationStream.Sight.cs). Events arrive on a background thread.
     /// </summary>
-    public sealed class NpcifyConversationStream : IDisposable
+    public sealed partial class NpcifyConversationStream : IDisposable
     {
         private const int TimeoutMs = 10_000;
 
@@ -533,7 +542,14 @@ namespace Npcify.Sdk.Api
                     connection.Connected.TrySetResult(false);
                     return false;
                 case 2:
-                    if (NpcifySocketIo.ReadEventName(packet.Json) == "exception")
+                {
+                    var eventName = NpcifySocketIo.ReadEventName(packet.Json);
+                    if (eventName == SightObservationEvent)
+                    {
+                        DispatchSightObservation(packet.Json);
+                        return true;
+                    }
+                    if (eventName == "exception")
                     {
                         Log?.Invoke("The conversation stream reported: " + packet.Json);
                         // The server refuses the join of a conversation that the key cannot read
@@ -547,6 +563,7 @@ namespace Npcify.Sdk.Api
                         }
                     }
                     return true;
+                }
                 case 5:
                 case 6:
                     connection.BinaryEvent = packet.SocketType == 5 ? NpcifySocketIo.ReadEventName(packet.Json) : null;

@@ -156,6 +156,8 @@ namespace Npcify.Sdk.Character
             _inputModes = NpcifyInputModes.Resolve(_options.InputModes, false, true, false);
             _bakedConversation = bakedConversation;
             _conversationId = "baked:" + bakedConversation.Asset.AvatarId;
+            // Sight is never available in a baked conversation.
+            SetSightConfiguration(false, true);
         }
 
         /// <summary>
@@ -175,6 +177,7 @@ namespace Npcify.Sdk.Character
                 info.AllowCustomReply,
                 info.BakedConversationEnabled || _bakedConversation != null,
                 info.SpeechInputEnabled);
+            ConfigureSight(info);
         }
 
         public StagingResultPayload StartBakedConversation(string stagingId = null)
@@ -357,7 +360,7 @@ namespace Npcify.Sdk.Character
         /// </summary>
         private async Task EnsureInputModesAsync(CancellationToken cancellationToken)
         {
-            if (_inputModes != null)
+            if (_inputModes != null && !SightInfoStale)
             {
                 return;
             }
@@ -456,6 +459,7 @@ namespace Npcify.Sdk.Character
                 stop.Stopped |= StopPlayback();
             }
             StopStreamTurns();
+            _sight?.Stop();
             _stream?.Leave();
             _liveMotionPrepared = null;
             _streamJoinGivenUp = null;
@@ -575,6 +579,7 @@ namespace Npcify.Sdk.Character
 
         public void Tick(double deltaTimeSeconds, float fallbackAudioRms = 0f)
         {
+            TickSight();
             lock (_playbackGate)
             {
                 while (_mainThreadWork.TryDequeue(out var work))
@@ -609,6 +614,7 @@ namespace Npcify.Sdk.Character
         {
             _api.OnStagingRetry -= HandleStagingRetry;
             StopStreamTurns();
+            _sight?.Stop();
             _stream?.Dispose();
             _api.Dispose();
         }

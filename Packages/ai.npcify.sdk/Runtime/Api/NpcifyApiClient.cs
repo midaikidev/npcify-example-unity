@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
@@ -525,17 +526,29 @@ namespace Npcify.Sdk.Api
 
         internal static NpcifyAssetInfo ParseAssetInfoJson(string json)
         {
+            if (!(NpcifyJson.TryParse(json) is Dictionary<string, object> info))
+            {
+                throw new InvalidDataException("The character info is not a JSON object.");
+            }
+            // sight: { enabled, provider }; an older server sends no sight, so it is off.
+            var sight = InfoField(info, "sight") as Dictionary<string, object>;
             return new NpcifyAssetInfo
             {
-                // The character name precedes the nested animation names in the info payload.
-                Name = ExtractJsonStringField(json, "name"),
-                IdleAnimationId = ExtractJsonStringField(json, "idleAnimationId"),
-                AllowCustomReply = ExtractJsonBoolField(json, "allowCustomReply"),
-                SpeechInputEnabled = ExtractJsonBoolField(json, "speechInputEnabled"),
-                BakedConversationEnabled = ExtractJsonBoolField(json, "bakedConversationEnabled"),
-                BakedConversationRevision = ExtractJsonIntField(json, "bakedConversationRevision"),
-                RealtimeMotionEnabled = ExtractJsonBoolField(json, "realtimeMotionEnabled"),
+                Name = InfoField(info, "name") as string,
+                IdleAnimationId = InfoField(info, "idleAnimationId") as string,
+                AllowCustomReply = InfoField(info, "allowCustomReply") is bool allowCustomReply && allowCustomReply,
+                SpeechInputEnabled = InfoField(info, "speechInputEnabled") is bool speechInput && speechInput,
+                BakedConversationEnabled = InfoField(info, "bakedConversationEnabled") is bool baked && baked,
+                BakedConversationRevision = InfoField(info, "bakedConversationRevision") is double revision ? (int)revision : 0,
+                RealtimeMotionEnabled = InfoField(info, "realtimeMotionEnabled") is bool realtimeMotion && realtimeMotion,
+                SightEnabled = sight != null && InfoField(sight, "enabled") is bool sightEnabled && sightEnabled,
+                SightProvider = sight != null ? InfoField(sight, "provider") as string : null,
             };
+        }
+
+        private static object InfoField(Dictionary<string, object> map, string key)
+        {
+            return map.TryGetValue(key, out var value) ? value : null;
         }
 
         /// <summary>The capabilities field: none for null, an empty list for an empty one.</summary>

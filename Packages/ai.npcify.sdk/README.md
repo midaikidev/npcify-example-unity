@@ -16,6 +16,7 @@ Unity Package Manager (UPM) client for embedding Npcify AI characters into Unity
   - Voice input: push-to-talk key or UI button, `StartListening` / `StopListeningAsync` / `CancelListening`, and the `InputModes` configuration. See [Voice input](#voice-input).
   - Live motion: the generated body motion of each reply on a UniVRM 1.0 model, and `PrepareLiveMotionAsync()`. See [Live motion](#live-motion).
   - Streamed replies: a reply starts to play when the audio of its first block is complete, before the reply is complete. See [Streamed replies](#streamed-replies).
+  - Sight: the character sees the game view or a webcam, and its replies use what it sees. See [Sight](#sight).
 
 ## Installation
 
@@ -33,14 +34,14 @@ Add the Npcify scoped registry and `ai.npcify.sdk` to `Packages/manifest.json`:
     }
   ],
   "dependencies": {
-    "ai.npcify.sdk": "0.6.2"
+    "ai.npcify.sdk": "0.7.0"
   }
 }
 ```
 
 ### Option 2: Download `.tgz` Tarball
 
-Download the latest UPM package tarball from `https://npcify.ai/sdk/unity/latest` (or a specific version from `https://npcify.ai/sdk/unity/app/0.6.2`), then in Unity open **Window > Package Manager > + > Install package from tarball...** and select the downloaded `ai.npcify.sdk-0.6.2.tgz` file.
+Download the latest UPM package tarball from `https://npcify.ai/sdk/unity/latest` (or a specific version from `https://npcify.ai/sdk/unity/app/0.7.0`), then in Unity open **Window > Package Manager > + > Install package from tarball...** and select the downloaded `ai.npcify.sdk-0.7.0.tgz` file.
 
 ## Quick Start (3D Game Integration)
 
@@ -266,6 +267,64 @@ clips.
   a conversation that you left while the server checked it does not stop the
   next conversation. WebGL builds
   have no `ClientWebSocket`, so they keep the prepared clips.
+
+## Sight
+
+When the owner of a character turns **sight** on in its Sight tab, the
+character can see: the SDK sends frames of the game view or of a webcam on the
+conversation stream, the server describes each frame with the owner's vision
+provider, and the character reads the observations of the last 60 s in its
+next reply ([sight](../../docs/sight.md)). The owner pays each frame.
+
+```csharp
+await character.CreateConversationAsync();
+if (character.SightState == NpcifySightState.Off)
+{
+    character.OnSight += observation => Debug.Log(observation.Summary);
+    await character.StartSight(new NpcifySightOptions { Camera = Camera.main });
+}
+```
+
+- **State:** `SightState` is `Unavailable` until the character info turns
+  sight on (the runtime reads it when a conversation starts), and in a baked
+  conversation; then `Off`, `Starting` or `On`. `OnSightState(state, error)`
+  reports each change; `error` is the `NpcifySightException` that stopped sight
+  or its start.
+- **Source:** `NpcifySightOptions.Camera` (its target texture, or the screen at
+  the end of the frame when it renders to the screen), `RenderTexture` (for
+  example the target of a camera at the character's eyes), or no source: the
+  screen, with the UI. These frames have the source `game`. A webcam
+  (`WebCam`, source `camera`) needs the scripting define `NPCIFY_SIGHT_WEBCAM`:
+  Unity adds the camera permission to an Android build, and a macOS or iOS
+  build needs a **Camera Usage Description**, when a script uses
+  `WebCamTexture`. A webcam that does not play yet starts after the camera
+  permission, and stops with sight; a webcam that plays stays yours.
+- **Frames:** the GPU scales the picture to fit inside 640 x 360, and
+  `AsyncGPUReadback` reads it without a stall. A worker thread encodes the
+  JPEG (`ImageConversion.EncodeArrayToJPG`, quality 70, then 50 once above
+  200 KiB). Every 250 ms the SDK compares a 32 x 18 luma grid (mip 5 of a
+  1024 x 576 copy) with the last one: a mean change above `MotionThreshold`
+  (8 on 0 to 255) sends a frame when one second passed since the last frame;
+  else a frame goes every `IntervalMs` (5000, at least 1000). One frame waits
+  for its acknowledgement at a time. No frames while the application is paused;
+  a disabled component stops sight. The profiler markers `Npcify.Sight.Grid` and
+  `Npcify.Sight.Frame` show the main-thread work.
+- **Codes:** `SIGHT_DISABLED`, `INSUFFICIENT_POINTS`,
+  `CONVERSATION_ACCESS_DENIED` and `SIGHT_SOURCE_ENDED` stop sight and go to
+  `OnError` and `OnSightState`. After `SIGHT_DISABLED` the state is
+  `Unavailable` until the next conversation reads the character info again.
+  Other codes, a timeout (20 s) and a lost connection skip the frame; after a
+  lost connection the next frame joins the conversation again first.
+  `StartSight` faults with `SIGHT_DISABLED`, `CONVERSATION_REQUIRED`,
+  `SIGHT_ALREADY_STARTED`, `SIGHT_SOURCE_UNAVAILABLE`, `CAMERA_UNAVAILABLE`,
+  `CAMERA_PERMISSION_DENIED`, or the code of a failed join.
+- **Events:** `OnSight` gets the observations of the current conversation
+  (`Summary`, `People`, `Persons`, `Text`, `Model`, `CostPoints`). `StopSight`,
+  `ResetConversation` and the end of the component stop sight.
+  `Runtime.OnStreamLog` notes the size and the acknowledgement of each frame.
+- **Transport:** the frames go on the conversation stream as the binary
+  Socket.IO event `conversations:sight`. WebGL builds have no
+  `ClientWebSocket` and no sight.
 
 ## Spatial Voice
 

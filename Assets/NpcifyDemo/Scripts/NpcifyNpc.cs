@@ -3,6 +3,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npcify.Sdk.Api;
 using Npcify.Sdk.Models;
+using Npcify.Sdk.Sight;
 using Npcify.Sdk.Unity;
 using UnityEngine;
 using UniVRM10;
@@ -115,7 +116,32 @@ namespace NpcifyDemo
         {
             EnsureReady();
             _character.ResetConversation();
-            return await _character.CreateConversationAsync(cancellationToken);
+            var opening = await _character.CreateConversationAsync(cancellationToken);
+            StartSight();
+            return opening;
+        }
+
+        // The online character sees the game view during the conversation when its owner turned
+        // sight on in the Sight tab (SDK 0.7.0).
+        private void StartSight()
+        {
+            if (mode == NpcConnectionMode.OnlineApi && _character.SightState == NpcifySightState.Off)
+            {
+                _ = StartSightAsync();
+            }
+        }
+
+        private async Task StartSightAsync()
+        {
+            try
+            {
+                await _character.StartSight(new NpcifySightOptions { Camera = Camera.main });
+                Debug.Log($"[Npcify demo] {DisplayName}: sight is on.");
+            }
+            catch (NpcifySightException ex)
+            {
+                Debug.LogWarning($"[Npcify demo] {DisplayName}: sight did not start: {ex.Code}");
+            }
         }
 
         public async Task<StagingResultPayload> ReplyAsync(string message, CancellationToken cancellationToken)
@@ -160,6 +186,7 @@ namespace NpcifyDemo
         {
             if (_character != null)
             {
+                _character.StopSight();
                 _character.StopSpeaking();
             }
             FaceTowards(null);
