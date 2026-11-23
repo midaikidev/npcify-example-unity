@@ -7,7 +7,7 @@ Unity Package Manager (UPM) client for embedding Npcify AI characters into Unity
 - **NPCP v1.0 Binary Performance Codec (`NpcifyPerformanceCodec`, `NpcifyMsgPack`)**: Zero-dependency C# implementation of the 24-byte NPCP envelope, IEEE 802.3 CRC-32 validation, bounded GZip decompression, and strict MessagePack wire subset validation.
 - **Offline Baked Conversations (`NpcifyBakedConversation`)**: Load `.npcp` baked conversation assets (`npcify.baked-conversation`) with embedded WAV/PCM audio, cycle/parent/option validation, and instant offline branching (`Start()`, `Select()`, `Reply()`, `Worldline()`).
 - **Live HTTP & NPCP API Client (`NpcifyApiClient`)**: Scoped API key authentication (`Authorization: Bearer` and `X-API-Token`), VRM/VRMA signed URL resolution, conversation creation, and staging generation with `Idempotency-Key` retries on HTTP `409`/`502`/`503`/`504`.
-- **Layered Facial Expression & Viseme Mixer (`NpcifyFacialMixer`, `NpcifyVisemePlayer`)**: Multi-layer blending (`Emotion`, `Viseme`, `Blink`, `Gaze`), exponential smoothing, automatic natural blinking, coarticulated viseme scheduling, and automatic alias resolution across VRM 1.0 (`aa`, `ih`, `ou`, `ee`, `oh`, `happy`), VRM 0.x (`A`, `I`, `U`, `E`, `O`, `Joy`), and ARKit/Fcl blendshapes.
+- **Layered Facial Expression & Viseme Mixer (`NpcifyFacialMixer`, `NpcifyVisemePlayer`)**: Multi-layer blending (`Emotion`, `Viseme`, `Blink`, `Gaze`), exponential smoothing, blinks as people do ([Blinks](#blinks)), coarticulated viseme scheduling, and automatic alias resolution across VRM 1.0 (`aa`, `ih`, `ou`, `ee`, `oh`, `happy`), VRM 0.x (`A`, `I`, `U`, `E`, `O`, `Joy`), and ARKit/Fcl blendshapes.
 - **Unity `MonoBehaviour` Integration (`NpcifyCharacter`)**:
   - Real-time access to `Root`, `Animator`, `SkinnedMeshRenderers`, `Meshes`, `Materials`, and humanoid bones via `GetBone(HumanBodyBones)`.
   - Spatial 3D `AudioSource` playback with automatic WAV/PCM16/Float32 `AudioClip` construction and live RMS amplitude analysis. See [Spatial voice](#spatial-voice).
@@ -17,6 +17,7 @@ Unity Package Manager (UPM) client for embedding Npcify AI characters into Unity
   - Live motion: the generated body motion of each reply on a UniVRM 1.0 model, and `PrepareLiveMotionAsync()`. See [Live motion](#live-motion).
   - Streamed replies: a reply starts to play when the audio of its first block is complete, before the reply is complete. See [Streamed replies](#streamed-replies).
   - Sight: the character sees the game view or a webcam, and its replies use what it sees. See [Sight](#sight).
+  - SDK player memory: `MemoryIdentifier` / `SetMemoryIdentifier(id)` isolates memories per player when **SDK Player Memory** is enabled in **Export → Unity**, or shares the character owner's **Dashboard → Memory** bucket when left empty.
 
 ## Installation
 
@@ -34,14 +35,14 @@ Add the Npcify scoped registry and `ai.npcify.sdk` to `Packages/manifest.json`:
     }
   ],
   "dependencies": {
-    "ai.npcify.sdk": "0.7.0"
+    "ai.npcify.sdk": "0.10.0"
   }
 }
 ```
 
 ### Option 2: Download `.tgz` Tarball
 
-Download the latest UPM package tarball from `https://npcify.ai/sdk/unity/latest` (or a specific version from `https://npcify.ai/sdk/unity/app/0.7.0`), then in Unity open **Window > Package Manager > + > Install package from tarball...** and select the downloaded `ai.npcify.sdk-0.7.0.tgz` file.
+Download the latest UPM package tarball from `https://npcify.ai/sdk/unity/latest` (or a specific version from `https://npcify.ai/sdk/unity/app/0.10.0`), then in Unity open **Window > Package Manager > + > Install package from tarball...** and select the downloaded `ai.npcify.sdk-0.10.0.tgz` file.
 
 ## Quick Start (3D Game Integration)
 
@@ -268,6 +269,38 @@ clips.
   next conversation. WebGL builds
   have no `ClientWebSocket`, so they keep the prepared clips.
 
+## Appearance Variants
+
+A staging can change the character's appearance variant with a
+`switch_variant` tool call ([performance protocol](../../docs/performance-protocol.md)).
+Give each variant a model in `variantBindings` (Inspector): a variant key and an
+avatar root under the character. At a change `NpcifyCharacter` makes the root of
+the next variant active, the others inactive, and raises `OnVariantChanged`.
+
+A change of variant changes the model only. The motion continues on the next
+model (SDK 0.8.1 and later):
+
+- **Animator:** the next model's `Animator` takes the state of the previous one:
+  the state and its normalized time on each layer, a crossfade in progress at
+  its progress, the layer weights, the speed and the float, int and bool
+  parameters (not the triggers). A layer whose controller has not got the state
+  keeps its own state. `NpcifyAnimatorHandover` does this; call it yourself when
+  you change models in other ways.
+- **UniVRM 1.0:** the next model plays the live pose from its first frame, and it
+  plays the VRMA (`Vrm10Runtime.VrmAnimation`) of the previous model when you
+  gave it none. Each spring joint at the same path under the next model takes
+  the spring state (bend and speed) of that joint of the previous model; the
+  other joints keep their own state. Only models of UniVRM's shared
+  `FastSpringBoneService` (the default) take part. The SDK writes the next
+  model's pose in the frame of the change.
+- **Live motion:** the weight and the pose continue; the change applies after the
+  live pose of its frame.
+- **Other rigs:** implement `INpcifyLiveMotionHandover` on your
+  `INpcifyLiveMotionTarget` to continue your own state.
+
+Load each variant model as the first one (control rig, `Vrm10Instance.Runtime`
+before rotation), parent it under the character and make it inactive.
+
 ## Sight
 
 When the owner of a character turns **sight** on in its Sight tab, the
@@ -338,6 +371,66 @@ for a 2D voice, for example in a menu or a phone call.
 Unity hears from the `AudioListener`, usually on the main camera. In a
 third-person game with a far camera, you can move the listener to the player
 character, so that the distance to the NPC sets the volume.
+
+## Blinks
+
+The face blinks as people do, by the rules of the Web SDK and the rendered
+video ([template-face playback](../../packages/vrm-renderer/README.md#template-face-playback),
+`NpcifyIdleBlinks`):
+
+- The interval between two blinks is irregular: 3.2 s in the middle, 1.2 s at
+  least, 9 s at most (about 17 blinks a minute). While the character speaks
+  (visemes play), the intervals are a quarter shorter.
+- A blink takes 300 ms: the lids close in 80 ms, stay closed for 50 ms and open
+  in 170 ms, fast at first and slowly at the end. One blink takes 0.85 to 1.25
+  times that length. A second, shorter blink follows 12 % of the blinks.
+- A blink goes with a movement. `NpcifyCharacter` asks for one when an
+  animation starts (`PlayAnimation`, a staging cue or a new state of the
+  `Animator`: 9 in 10), on the return to the idle animation (6 in 10), at the
+  start of live motion (9 in 10), at a fast turn of the head bone (none below
+  8 degrees, always from 30 degrees, measured against the direction of 0.3 s
+  ago) and at a large gaze shift of `LookAt` (the same numbers).
+- No movement starts a blink while one plays or within 0.6 s after one.
+  Requests less than 0.5 s apart count as one movement with the largest
+  chance.
+- A cue on `blink`, `blinkLeft` or `blinkRight` stops the idle blink while it
+  plays. The blink plays in full with every emotion.
+
+A game that plays its own animations calls `NoteAnimationStarted(animationId)`
+when it starts one, for example the return to idle at the end of a gesture.
+The idle animation is the character's `idleAnimationId` ("idle" until the
+character info is read). `RequestBlink(chance)` asks for a blink at any other
+movement. Turn `autoBlink` off to drive the lids yourself.
+
+The SDK plays one blend shape for each lid (`NpcifyBlendShapePlan`). A generated
+face has `blink`, `blinkLeft`, `blinkRight`, `eyeBlinkLeft` and `eyeBlinkRight`,
+and a VRoid face has `Fcl_EYE_Close` and its two sides. Before 0.9.0 all of them
+played the blink, so each lid closed two or three times.
+
+### Expressions of the VRM File
+
+Since 0.10.0, with UniVRM 1.0 in the project, the SDK reads the preset expressions of the
+model (`Vrm10Instance.Vrm.Expression`) and plays each expression with the blend
+shapes that the VRM file binds to it, with the weights of the file, as the Web
+SDK does. For a generated face, `happy` plays the joy shape of the face and
+stops the blinks, and `ou` and `oh` play only their own shapes.
+
+- An expression that the file binds does not play by alias names. Thus a bound
+  `happy` does not play `mouthSmileLeft`, and a bound `aa` does not play
+  `jawOpen`.
+- An expression without binds keeps the alias names. The gaze of a generated
+  face is an example: its eyes are bones, so `lookLeft` plays `eyeLookOutLeft`
+  and `eyeLookInRight`.
+- "Is binary" and the overrides of the blinks and of the gaze apply.
+- A file with `blinkLeft` and `blinkRight` but without `blink` plays a blink on
+  the two sides.
+- Only the preset expressions play. Custom expressions of the file have no
+  weight in the mixer.
+
+A model without UniVRM plays by the alias names of its blend shapes. A game
+with another VRM loader can give the expressions itself:
+`NpcifyVrmExpressionSources.Register` takes a function from a
+`SkinnedMeshRenderer` to a list of `NpcifyVrmExpression`.
 
 ## Example Project
 

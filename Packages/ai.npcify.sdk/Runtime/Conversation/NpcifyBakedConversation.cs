@@ -257,6 +257,7 @@ namespace Npcify.Sdk.Conversation
             for (var i = 0; i < _asset.Stagings.Count; i++)
             {
                 var node = _asset.Stagings[i];
+                var timeline = node.Payload?.Timeline;
                 nodes.Add(new ConversationWorldlineNode
                 {
                     Id = node.Id,
@@ -267,6 +268,11 @@ namespace Npcify.Sdk.Conversation
                         ? new List<StagingReplyOption>(node.Payload.Options)
                         : new List<StagingReplyOption>(),
                     CreatedAt = "1970-01-01T00:00:00.000Z",
+                    InitialVariant = timeline?.InitialVariant,
+                    ActiveVariant = timeline?.ActiveVariant,
+                    ToolCalls = timeline?.ToolCalls != null
+                        ? new List<NpcifyStagingToolCall>(timeline.ToolCalls)
+                        : new List<NpcifyStagingToolCall>(),
                 });
             }
 

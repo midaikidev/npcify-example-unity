@@ -25,7 +25,7 @@ namespace Npcify.Sdk.Unity.UniVrm
     [DefaultExecutionOrder(10999)]
     [DisallowMultipleComponent]
     [AddComponentMenu("Npcify/Npcify VRM 1.0 Live Motion")]
-    public sealed class NpcifyVrm10LiveMotion : MonoBehaviour, INpcifyLiveMotionTarget
+    public sealed class NpcifyVrm10LiveMotion : MonoBehaviour, INpcifyLiveMotionTarget, INpcifyLiveMotionHandover
     {
         private static readonly Dictionary<string, HumanBodyBones> UnityBones = new Dictionary<string, HumanBodyBones>(StringComparer.Ordinal)
         {
@@ -92,6 +92,31 @@ namespace Npcify.Sdk.Unity.UniVrm
         public void Bind(NpcifyLiveMotionPlayer player)
         {
             _player = player;
+        }
+
+        /// <summary>
+        /// Continues the motion of the model that left at a change of appearance variant: this model
+        /// plays the live pose from its first frame, plays the VRM animation of the model that left
+        /// when the game gave it none, and its springs continue the springs of that model. UniVRM's
+        /// update of the frame can be over when this model becomes active, so this model writes its
+        /// pose now; otherwise its first frame shows the pose of the moment when it left.
+        /// </summary>
+        public void TakeOver(INpcifyLiveMotionTarget previous)
+        {
+            Install();
+            if (previous is NpcifyVrm10LiveMotion other && other != this && other._vrm != null)
+            {
+                if (_runtime != null && ReferenceEquals(_runtime.VrmAnimation, _animation) &&
+                    _animation.Inner == null && other._animation?.Inner != null)
+                {
+                    _animation.Inner = other._animation.Inner;
+                }
+                NpcifyVrm10SpringHandover.Copy(other._vrm, _vrm);
+            }
+            if (_vrm != null && _vrm.isActiveAndEnabled && _vrm.UpdateType != Vrm10Instance.UpdateTypes.None)
+            {
+                _vrm.Runtime.Process();
+            }
         }
 
         private void Awake()

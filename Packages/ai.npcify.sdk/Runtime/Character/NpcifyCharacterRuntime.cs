@@ -44,6 +44,8 @@ namespace Npcify.Sdk.Character
         private float _volume = 1f;
         private bool _muted;
         private string _currentAnimation = "idle";
+        private string _idleAnimationId = "idle";
+        private bool _liveMotionShown;
         private IReadOnlyList<NpcifyInputMode> _inputModes;
         // The character's voice input switch, after its info was read.
         private bool? _speechInputEnabled;
@@ -51,15 +53,17 @@ namespace Npcify.Sdk.Character
         public NpcifyCharacterRuntime(
             NpcifyOptions options,
             NpcifyApiClient apiClient = null,
-            Func<NpcifyConversationStream> streamFactory = null)
+            Func<NpcifyConversationStream> streamFactory = null,
+            NpcifyFacialMixer expressions = null)
         {
             _options = options ?? throw new ArgumentNullException(nameof(options));
+            _options.MemoryIdentifier = NpcifyOptions.NormalizeMemoryIdentifier(_options.MemoryIdentifier);
             NpcifyInputModes.Validate(options.InputModes);
             _volume = options.Volume;
             _muted = options.Muted;
             _api = apiClient ?? new NpcifyApiClient(options);
             _streamFactory = streamFactory ?? (() => new NpcifyConversationStream(options));
-            _expressions = new NpcifyFacialMixer();
+            _expressions = expressions ?? new NpcifyFacialMixer();
             _visemePlayer = new NpcifyVisemePlayer();
             _stagingPlayer = new NpcifyStagingPlayer(_expressions, _visemePlayer);
             _liveMotion = new NpcifyLiveMotionPlayer(options.LiveMotion);
@@ -70,6 +74,7 @@ namespace Npcify.Sdk.Character
                 PlayAnimation(clip.Animation, clip.Loop);
             _stagingPlayer.OnStagingCompleted += HandleStagingCompleted;
             _api.OnStagingRetry += HandleStagingRetry;
+            BindVariants();
         }
 
         public event Action<StagingResultPayload> OnSpeechStart;
@@ -111,6 +116,13 @@ namespace Npcify.Sdk.Character
         public string ConversationId => _conversationId;
 
         public string ActiveStagingId => _activeStagingId;
+
+        public string MemoryIdentifier => NpcifyOptions.NormalizeMemoryIdentifier(_options.MemoryIdentifier);
+
+        public void SetMemoryIdentifier(string memoryIdentifier)
+        {
+            _options.MemoryIdentifier = NpcifyOptions.NormalizeMemoryIdentifier(memoryIdentifier);
+        }
 
         public string CurrentAnimation => _currentAnimation;
 
@@ -172,12 +184,17 @@ namespace Npcify.Sdk.Character
             }
             _speechInputEnabled = info.SpeechInputEnabled;
             _liveMotionInEffect = info.RealtimeMotionEnabled;
+            if (!string.IsNullOrWhiteSpace(info.IdleAnimationId))
+            {
+                _idleAnimationId = info.IdleAnimationId;
+            }
             _inputModes = NpcifyInputModes.Resolve(
                 _options.InputModes,
                 info.AllowCustomReply,
                 info.BakedConversationEnabled || _bakedConversation != null,
                 info.SpeechInputEnabled);
             ConfigureSight(info);
+            ConfigureVariants(info);
         }
 
         public StagingResultPayload StartBakedConversation(string stagingId = null)
@@ -559,7 +576,25 @@ namespace Npcify.Sdk.Character
                 return;
             }
             _currentAnimation = animationId;
+            NoteAnimationStarted(animationId);
             OnAnimationPlayRequested?.Invoke(animationId, loop);
+        }
+
+        /// <summary>The character's idle animation (its info), "idle" until the info is read.</summary>
+        public string IdleAnimationId => _idleAnimationId;
+
+        /// <summary>
+        /// Tells the face that the body starts the animation <paramref name="animationId"/>: people
+        /// blink when they start another movement. 9 in 10 new animations and 6 in 10 returns to
+        /// the idle animation bring a blink (<see cref="NpcifyIdleBlinks"/>). <see cref="PlayAnimation"/>
+        /// calls it; call it when the game starts an animation by itself, for example the return to
+        /// idle at the end of an animation that plays once.
+        /// </summary>
+        public void NoteAnimationStarted(string animationId)
+        {
+            var idle = string.IsNullOrWhiteSpace(animationId) ||
+                string.Equals(animationId, _idleAnimationId, StringComparison.OrdinalIgnoreCase);
+            _expressions.RequestBlink(idle ? NpcifyIdleBlinks.IdleReturnBlinkChance : NpcifyIdleBlinks.ActionBlinkChance);
         }
 
         public void LookAt(float yawDegrees, float pitchDegrees)
@@ -586,13 +621,29 @@ namespace Npcify.Sdk.Character
                 {
                     work();
                 }
-                _stagingPlayer.Tick(deltaTimeSeconds, fallbackAudioRms);
+                _ticking = true;
+                try
+                {
+                    _stagingPlayer.Tick(deltaTimeSeconds, fallbackAudioRms);
+                }
+                finally
+                {
+                    _ticking = false;
+                }
                 // Live motion follows the staging clock; no staging: blend back to idle.
                 var playing = _stagingPlayer.IsPlaying ? _stagingPlayer.CurrentStaging : null;
                 _liveMotion.Update(
                     deltaTimeSeconds,
                     playing?.StagingId,
                     playing != null ? _stagingPlayer.TimelineElapsedSeconds : (double?)null);
+                ApplyTickVariantCues();
+                // The start of live motion is a new movement: it brings a blink as a new animation does.
+                var shown = _liveMotion.Weight > 0;
+                if (shown && !_liveMotionShown)
+                {
+                    _expressions.RequestBlink(NpcifyIdleBlinks.ActionBlinkChance);
+                }
+                _liveMotionShown = shown;
             }
         }
 

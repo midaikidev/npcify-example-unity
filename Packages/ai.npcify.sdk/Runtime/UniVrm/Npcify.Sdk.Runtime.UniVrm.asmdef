@@ -4,7 +4,10 @@
   "references": [
     "Npcify.Sdk.Runtime",
     "VRM10",
-    "UniGLTF.Utils"
+    "UniGLTF.Utils",
+    "SpringBoneJobs",
+    "FastSpringBone10",
+    "Unity.Mathematics"
   ],
   "includePlatforms": [],
   "excludePlatforms": [],

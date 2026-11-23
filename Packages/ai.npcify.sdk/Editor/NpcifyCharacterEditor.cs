@@ -18,6 +18,7 @@ namespace Npcify.Sdk.Editor
             public string endpoint;
             public string characterId;
             public string apiKey;
+            public string memoryIdentifier;
             public bool bakedConversationEnabled;
         }
 
@@ -55,6 +56,7 @@ namespace Npcify.Sdk.Editor
                                 CharacterId = parsed.characterId,
                                 BaseUrl = resolvedBaseUrl,
                                 ApiKey = parsed.apiKey,
+                                MemoryIdentifier = parsed.memoryIdentifier,
                             });
                             EditorUtility.SetDirty(character);
                         }

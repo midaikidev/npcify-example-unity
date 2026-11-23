@@ -20,6 +20,8 @@ namespace Npcify.Sdk.Unity
         [SerializeField] private string characterId = string.Empty;
         [SerializeField] private string apiKey = string.Empty;
         [SerializeField] private string endpoint = "https://api.npcify.ai";
+        [Tooltip("Optional player memory identifier when SDK Player Memory is enabled. Leave empty to use the character owner's Dashboard -> Memory bucket.")]
+        [SerializeField] private string memoryIdentifier = string.Empty;
 
         [Header("Character Rig & Audio")]
         [SerializeField] private Transform avatarRoot;
@@ -32,6 +34,7 @@ namespace Npcify.Sdk.Unity
         [SerializeField, Min(0f)] private float voiceMinDistance = 2.5f;
         [Tooltip("The voice fades linearly to silence at this distance, in meters. Used for an AudioSource that the SDK adds.")]
         [SerializeField, Min(0.01f)] private float voiceMaxDistance = 30f;
+        [Tooltip("The face blinks by itself, as people do: at irregular intervals, more often while it speaks, and with a large gaze shift, a fast turn of the head or a new animation.")]
         [SerializeField] private bool autoBlink = true;
 
         [Header("Offline Baked Conversation (Optional)")]
@@ -74,6 +77,18 @@ namespace Npcify.Sdk.Unity
         {
             get => endpoint;
             set => endpoint = string.IsNullOrWhiteSpace(value) ? "https://api.npcify.ai" : value;
+        }
+
+        public string MemoryIdentifier
+        {
+            get => NpcifyOptions.NormalizeMemoryIdentifier(memoryIdentifier);
+            set => SetMemoryIdentifier(value);
+        }
+
+        public void SetMemoryIdentifier(string value)
+        {
+            memoryIdentifier = NpcifyOptions.NormalizeMemoryIdentifier(value);
+            _runtime?.SetMemoryIdentifier(memoryIdentifier);
         }
 
         public Transform Root => avatarRoot != null ? avatarRoot : transform;
@@ -132,6 +147,7 @@ namespace Npcify.Sdk.Unity
             characterId = options.CharacterId ?? string.Empty;
             apiKey = options.ResolvedToken;
             endpoint = string.IsNullOrWhiteSpace(options.BaseUrl) ? "https://api.npcify.ai" : options.BaseUrl;
+            memoryIdentifier = NpcifyOptions.NormalizeMemoryIdentifier(options.MemoryIdentifier);
             inputModes = options.InputModes != null
                 ? new List<Npcify.Sdk.Speech.NpcifyInputMode>(options.InputModes)
                 : new List<Npcify.Sdk.Speech.NpcifyInputMode>();
@@ -169,6 +185,8 @@ namespace Npcify.Sdk.Unity
             _skinnedMeshRenderers.Clear();
             _meshes.Clear();
             _materials.Clear();
+            _blendShapePlans.Clear();
+            _animatorStateKnown = false;
 
             var renderers = avatarRoot.GetComponentsInChildren<SkinnedMeshRenderer>(true);
             for (var i = 0; i < renderers.Length; i++)
@@ -275,62 +293,10 @@ namespace Npcify.Sdk.Unity
             _runtime.StopSpeaking();
         }
 
-        public void SetEmotion(string expression, float weight = 1f)
-        {
-            EnsureInitialized();
-            _runtime.Expressions.SetEmotion(expression, weight);
-        }
-
-        public void ClearEmotion()
-        {
-            EnsureInitialized();
-            _runtime.Expressions.ClearEmotion();
-        }
-
-        public void PlayExpressionCue(
-            string expression,
-            float weight = 1f,
-            float durationSeconds = 1.2f,
-            float fadeInSeconds = 0.15f,
-            float fadeOutSeconds = 0.25f
-        )
-        {
-            EnsureInitialized();
-            _runtime.Expressions.PlayCue(expression, weight, durationSeconds, fadeInSeconds, fadeOutSeconds);
-        }
-
         public void PlayAnimation(string animationId, bool loop = false)
         {
             EnsureInitialized();
             _runtime.PlayAnimation(animationId, loop);
-        }
-
-        public void LookAt(Transform target)
-        {
-            EnsureInitialized();
-            gazeTarget = target;
-            _hasLookAtPosition = false;
-            if (target == null)
-            {
-                _runtime.ClearLookAt();
-            }
-        }
-
-        public void LookAt(Vector3 worldPosition)
-        {
-            EnsureInitialized();
-            gazeTarget = null;
-            _lookAtWorldPosition = worldPosition;
-            _hasLookAtPosition = true;
-            UpdateGazeLayer();
-        }
-
-        public void ClearLookAt()
-        {
-            EnsureInitialized();
-            gazeTarget = null;
-            _hasLookAtPosition = false;
-            _runtime.ClearLookAt();
         }
 
         public float GetAudioRmsAmplitude()
@@ -383,6 +349,7 @@ namespace Npcify.Sdk.Unity
 
         private void LateUpdate()
         {
+            WatchBodyForBlinks();
             ApplyBlendShapesToSkinnedMeshes();
         }
 
@@ -416,6 +383,7 @@ namespace Npcify.Sdk.Unity
                 CharacterId = string.IsNullOrWhiteSpace(characterId) ? "unconfigured-character" : characterId,
                 ApiKey = apiKey,
                 BaseUrl = string.IsNullOrWhiteSpace(endpoint) ? "https://api.npcify.ai" : endpoint,
+                MemoryIdentifier = NpcifyOptions.NormalizeMemoryIdentifier(memoryIdentifier),
                 InputModes = inputModes != null && inputModes.Count > 0
                     ? new List<Npcify.Sdk.Speech.NpcifyInputMode>(inputModes)
                     : null,
@@ -442,6 +410,7 @@ namespace Npcify.Sdk.Unity
             _runtime.OnTranscript += transcript => TranscriptReceived?.Invoke(transcript.Text);
             BindSight();
             BindLiveMotionTarget();
+            BindVariants();
         }
 
         private void HandleAudioBlock(StagingDialogueBlock block, NpcifyDecodedAudio decodedAudio)
@@ -720,46 +689,6 @@ namespace Npcify.Sdk.Unity
             if (animatorComponent.HasState(0, stateHash))
             {
                 animatorComponent.CrossFadeInFixedTime(stateHash, 0.2f);
-            }
-        }
-
-        private void UpdateGazeLayer()
-        {
-            if (gazeTarget == null && !_hasLookAtPosition)
-            {
-                _runtime.ClearLookAt();
-                return;
-            }
-
-            var targetWorldPos = gazeTarget != null ? gazeTarget.position : _lookAtWorldPosition;
-            var headTransform = GetBone(HumanBodyBones.Head) ?? Root;
-            var localDir = headTransform.InverseTransformPoint(targetWorldPos);
-            _runtime.LookAtDirection(localDir.x, localDir.y, localDir.z);
-        }
-
-        private void ApplyBlendShapesToSkinnedMeshes()
-        {
-            if (_runtime == null || _skinnedMeshRenderers.Count == 0)
-            {
-                return;
-            }
-
-            for (var rIdx = 0; rIdx < _skinnedMeshRenderers.Count; rIdx++)
-            {
-                var renderer = _skinnedMeshRenderers[rIdx];
-                if (renderer == null || renderer.sharedMesh == null)
-                {
-                    continue;
-                }
-
-                var mesh = renderer.sharedMesh;
-                var count = mesh.blendShapeCount;
-                for (var bIdx = 0; bIdx < count; bIdx++)
-                {
-                    var shapeName = mesh.GetBlendShapeName(bIdx);
-                    var weight01 = _runtime.Expressions.ResolveBlendShapeWeight01(shapeName);
-                    renderer.SetBlendShapeWeight(bIdx, weight01 * 100f);
-                }
             }
         }
     }

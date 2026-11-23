@@ -446,6 +446,18 @@ namespace Npcify.Sdk.Character
             {
                 target.Motion = timeline.Motion;
             }
+            if (!string.IsNullOrEmpty(timeline.InitialVariant))
+            {
+                target.InitialVariant = timeline.InitialVariant;
+            }
+            if (!string.IsNullOrEmpty(timeline.ActiveVariant))
+            {
+                target.ActiveVariant = timeline.ActiveVariant;
+            }
+            if (timeline.ToolCalls != null)
+            {
+                target.ToolCalls = timeline.ToolCalls;
+            }
         }
 
         /// <summary>

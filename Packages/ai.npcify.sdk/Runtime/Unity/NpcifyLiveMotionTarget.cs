@@ -21,6 +21,17 @@ namespace Npcify.Sdk.Unity
     }
 
     /// <summary>
+    /// A target that continues the motion of another target. At a change of appearance variant
+    /// NpcifyCharacter calls <see cref="TakeOver"/> on the target of the next model with the target
+    /// of the model that left, after the next model became active: the change changes the model
+    /// only, not the animation state.
+    /// </summary>
+    public interface INpcifyLiveMotionHandover
+    {
+        void TakeOver(INpcifyLiveMotionTarget previous);
+    }
+
+    /// <summary>
     /// Factories that find a live motion target under an avatar root. The UniVRM 1.0 adapter
     /// (assembly Npcify.Sdk.Runtime.UniVrm) registers itself when UniVRM is in the project.
     /// </summary>

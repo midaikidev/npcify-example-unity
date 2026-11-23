@@ -180,7 +180,52 @@ namespace Npcify.Sdk.Models
 
             timeline.Motions = Npcify.Sdk.Motion.NpcifyMotionFrames.ParsePrompts(GetList(map, "motions"));
             timeline.Motion = Npcify.Sdk.Motion.NpcifyMotionFrames.TryParseTrack(GetMap(map, "motion"));
+            timeline.InitialVariant = GetString(map, "initialVariant");
+            timeline.ActiveVariant = GetString(map, "activeVariant");
+            timeline.ToolCalls = MapToolCalls(GetList(map, "toolCalls"));
             return timeline;
+        }
+
+        public static List<NpcifyStagingToolCall> MapToolCalls(IList rawList)
+        {
+            var calls = new List<NpcifyStagingToolCall>();
+            if (rawList == null)
+            {
+                return calls;
+            }
+
+            foreach (var item in rawList)
+            {
+                if (!(item is Dictionary<string, object> callMap))
+                {
+                    continue;
+                }
+
+                var argsMap = GetMap(callMap, "arguments");
+                var resultMap = GetMap(callMap, "result");
+                var variant = (argsMap != null ? GetString(argsMap, "variant") : GetString(callMap, "variant"))
+                    ?? NpcifyVariantSummary.DefaultKey;
+
+                calls.Add(new NpcifyStagingToolCall
+                {
+                    Id = GetString(callMap, "id") ?? string.Empty,
+                    Name = GetString(callMap, "name") ?? "switch_variant",
+                    Timestamp = Math.Max(0.0, GetDouble(callMap, "timestamp", 0.0)),
+                    Variant = variant,
+                    Result = new NpcifyToolCallResult
+                    {
+                        Ok = resultMap != null && GetBool(resultMap, "ok", false),
+                        Status = (resultMap != null ? GetString(resultMap, "status") : null) ?? "rejected",
+                        PreviousVariant = (resultMap != null ? GetString(resultMap, "previousVariant") : null)
+                            ?? NpcifyVariantSummary.DefaultKey,
+                        ActiveVariant = (resultMap != null ? GetString(resultMap, "activeVariant") : null)
+                            ?? NpcifyVariantSummary.DefaultKey,
+                        Error = resultMap != null ? GetString(resultMap, "error") : null,
+                    },
+                });
+            }
+
+            return calls;
         }
 
         public static StagingDialogueBlock MapDialogueBlock(Dictionary<string, object> map)
@@ -405,19 +450,63 @@ namespace Npcify.Sdk.Models
                 });
             }
 
+            var timelineMap = new Dictionary<string, object>(StringComparer.Ordinal)
+            {
+                ["duration"] = payload.Timeline.Duration,
+                ["dialogue"] = dialogue,
+                ["expressions"] = expressions,
+                ["animations"] = animations,
+            };
+            if (!string.IsNullOrEmpty(payload.Timeline.InitialVariant))
+            {
+                timelineMap["initialVariant"] = payload.Timeline.InitialVariant;
+            }
+            if (!string.IsNullOrEmpty(payload.Timeline.ActiveVariant))
+            {
+                timelineMap["activeVariant"] = payload.Timeline.ActiveVariant;
+            }
+            if (payload.Timeline.ToolCalls != null && payload.Timeline.ToolCalls.Count > 0)
+            {
+                var toolCalls = new List<object>(payload.Timeline.ToolCalls.Count);
+                foreach (var call in payload.Timeline.ToolCalls)
+                {
+                    if (call == null)
+                    {
+                        continue;
+                    }
+                    var resultMap = new Dictionary<string, object>(StringComparer.Ordinal)
+                    {
+                        ["ok"] = call.Result != null && call.Result.Ok,
+                        ["status"] = call.Result?.Status ?? "applied",
+                        ["previousVariant"] = call.Result?.PreviousVariant ?? NpcifyVariantSummary.DefaultKey,
+                        ["activeVariant"] = call.Result?.ActiveVariant ?? NpcifyVariantSummary.DefaultKey,
+                    };
+                    if (!string.IsNullOrEmpty(call.Result?.Error))
+                    {
+                        resultMap["error"] = call.Result.Error;
+                    }
+                    toolCalls.Add(new Dictionary<string, object>(StringComparer.Ordinal)
+                    {
+                        ["id"] = call.Id ?? string.Empty,
+                        ["name"] = call.Name ?? "switch_variant",
+                        ["timestamp"] = call.Timestamp,
+                        ["arguments"] = new Dictionary<string, object>(StringComparer.Ordinal)
+                        {
+                            ["variant"] = call.Variant ?? NpcifyVariantSummary.DefaultKey,
+                        },
+                        ["result"] = resultMap,
+                    });
+                }
+                timelineMap["toolCalls"] = toolCalls;
+            }
+
             return new Dictionary<string, object>(StringComparer.Ordinal)
             {
                 ["protocolVersion"] = (long)payload.ProtocolVersion,
                 ["taskId"] = payload.TaskId ?? string.Empty,
                 ["stagingId"] = payload.StagingId,
                 ["text"] = payload.Text ?? string.Empty,
-                ["timeline"] = new Dictionary<string, object>(StringComparer.Ordinal)
-                {
-                    ["duration"] = payload.Timeline.Duration,
-                    ["dialogue"] = dialogue,
-                    ["expressions"] = expressions,
-                    ["animations"] = animations,
-                },
+                ["timeline"] = timelineMap,
                 ["options"] = options,
             };
         }

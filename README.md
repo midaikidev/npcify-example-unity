@@ -86,7 +86,7 @@ typewriter text) and writes the face blend shapes of the VRM model.
   saw in its next reply. The owner pays each frame. The end of the
   conversation stops sight.
 
-The Npcify Unity SDK is in `Packages/ai.npcify.sdk` (version 0.7.0).
+The Npcify Unity SDK is in `Packages/ai.npcify.sdk` (version 0.10.0).
 
 ### Anime look
 

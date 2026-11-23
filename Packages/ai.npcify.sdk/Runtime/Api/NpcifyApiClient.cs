@@ -27,7 +27,7 @@ namespace Npcify.Sdk.Api
         }
     }
 
-    public sealed class NpcifyApiClient : IDisposable
+    public sealed partial class NpcifyApiClient : IDisposable
     {
         private readonly NpcifyOptions _options;
         private readonly HttpClient _httpClient;
@@ -204,7 +204,8 @@ namespace Npcify.Sdk.Api
         )
         {
             var url = $"{BaseUrl}/conversations";
-            var jsonBody = $"{{\"avatarId\":{EncodeJsonString(_options.CharacterId)}{EncodeCapabilities(capabilities)}}}";
+            var jsonBody =
+                $"{{\"avatarId\":{EncodeJsonString(_options.CharacterId)}{EncodeCapabilities(capabilities)}{EncodeMemoryIdentifier(_options.MemoryIdentifier)}}}";
 
             using (var request = CreateJsonPostRequest(url, jsonBody, NpcifyPerformanceCodec.MediaType, null, renderSessionId))
             using (var response = await SendAsync(request, null, cancellationToken).ConfigureAwait(false))
@@ -270,7 +271,7 @@ namespace Npcify.Sdk.Api
                 ? "null"
                 : EncodeJsonString(parentStagingId);
             var jsonBody =
-                $"{{\"content\":{EncodeJsonString(message)},\"silent\":{(silent ? "true" : "false")},\"incrementalPlayback\":true,\"parentStagingId\":{parentJson}{EncodeCapabilities(capabilities)}}}";
+                $"{{\"content\":{EncodeJsonString(message)},\"silent\":{(silent ? "true" : "false")},\"incrementalPlayback\":true,\"parentStagingId\":{parentJson}{EncodeCapabilities(capabilities)}{EncodeMemoryIdentifier(_options.MemoryIdentifier)}}}";
 
             int[] retryDelaysMs = { 0, 150, 300, 600, 1200, 2000, 2000 };
             Exception lastError = null;
@@ -532,7 +533,7 @@ namespace Npcify.Sdk.Api
             }
             // sight: { enabled, provider }; an older server sends no sight, so it is off.
             var sight = InfoField(info, "sight") as Dictionary<string, object>;
-            return new NpcifyAssetInfo
+            var result = new NpcifyAssetInfo
             {
                 Name = InfoField(info, "name") as string,
                 IdleAnimationId = InfoField(info, "idleAnimationId") as string,
@@ -543,12 +544,23 @@ namespace Npcify.Sdk.Api
                 RealtimeMotionEnabled = InfoField(info, "realtimeMotionEnabled") is bool realtimeMotion && realtimeMotion,
                 SightEnabled = sight != null && InfoField(sight, "enabled") is bool sightEnabled && sightEnabled,
                 SightProvider = sight != null ? InfoField(sight, "provider") as string : null,
+                SdkMemoryEnabled = InfoField(info, "sdkMemoryEnabled") is bool sdkMemory && sdkMemory,
             };
+            PopulateInfoCollections(info, result);
+            return result;
         }
 
         private static object InfoField(Dictionary<string, object> map, string key)
         {
             return map.TryGetValue(key, out var value) ? value : null;
+        }
+
+        private static string EncodeMemoryIdentifier(string memoryIdentifier)
+        {
+            var normalized = NpcifyOptions.NormalizeMemoryIdentifier(memoryIdentifier);
+            return string.IsNullOrEmpty(normalized)
+                ? ",\"memoryIdentifier\":null"
+                : ",\"memoryIdentifier\":" + EncodeJsonString(normalized);
         }
 
         /// <summary>The capabilities field: none for null, an empty list for an empty one.</summary>

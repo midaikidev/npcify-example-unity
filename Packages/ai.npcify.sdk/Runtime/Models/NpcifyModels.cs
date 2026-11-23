@@ -6,10 +6,18 @@ namespace Npcify.Sdk.Models
     [Serializable]
     public sealed class NpcifyOptions
     {
+        public const int MaxMemoryIdentifierLength = 128;
+
         public string BaseUrl = "https://api.npcify.ai";
         public string CharacterId = string.Empty;
         public string ApiKey = string.Empty;
         public string ApiToken = string.Empty;
+        /// <summary>
+        /// Optional player memory identifier when SDK Player Memory is enabled on the character.
+        /// Non-empty identifiers isolate memories per player; empty or null maps to the character
+        /// owner's Dashboard -> Memory bucket.
+        /// </summary>
+        public string MemoryIdentifier = string.Empty;
         public bool ServerRendering;
         public bool Authoring;
         public byte[] BakedConversationBytes;
@@ -39,6 +47,34 @@ namespace Npcify.Sdk.Models
                 : !string.IsNullOrWhiteSpace(ApiKey)
                     ? ApiKey.Trim()
                     : string.Empty;
+
+        public static string NormalizeMemoryIdentifier(string value)
+        {
+            if (string.IsNullOrEmpty(value))
+            {
+                return string.Empty;
+            }
+            var normalized = value.Normalize(System.Text.NormalizationForm.FormKC);
+            var sb = new System.Text.StringBuilder(normalized.Length);
+            for (var i = 0; i < normalized.Length; i++)
+            {
+                var c = normalized[i];
+                if (c > '\u001f' && c != '\u007f')
+                {
+                    sb.Append(c);
+                }
+            }
+            var trimmed = sb.ToString().Trim();
+            if (trimmed.Length == 0)
+            {
+                return string.Empty;
+            }
+            if (trimmed.Length > MaxMemoryIdentifierLength)
+            {
+                trimmed = trimmed.Substring(0, MaxMemoryIdentifierLength).Trim();
+            }
+            return trimmed;
+        }
     }
 
     [Serializable]
@@ -50,9 +86,44 @@ namespace Npcify.Sdk.Models
     }
 
     [Serializable]
+    public sealed class NpcifyVariantSummary
+    {
+        public const string DefaultKey = "default";
+        public const string NudeKey = "nude";
+
+        public string Key = DefaultKey;
+        public string Label = string.Empty;
+        public string Description = string.Empty;
+        public bool R18;
+        public string PortraitUrl;
+        public string CreditText;
+    }
+
+    [Serializable]
+    public sealed class NpcifyToolCallResult
+    {
+        public bool Ok;
+        public string Status = "applied";
+        public string PreviousVariant = NpcifyVariantSummary.DefaultKey;
+        public string ActiveVariant = NpcifyVariantSummary.DefaultKey;
+        public string Error;
+    }
+
+    [Serializable]
+    public sealed class NpcifyStagingToolCall
+    {
+        public string Id = string.Empty;
+        public string Name = "switch_variant";
+        public double Timestamp;
+        public string Variant = NpcifyVariantSummary.DefaultKey;
+        public NpcifyToolCallResult Result = new NpcifyToolCallResult();
+    }
+
+    [Serializable]
     public sealed class NpcifyAssetInfo
     {
         public List<NpcifyAnimationEntry> Animations = new List<NpcifyAnimationEntry>();
+        public List<NpcifyVariantSummary> Variants = new List<NpcifyVariantSummary>();
         public string Name;
         public string IdleAnimationId;
         public bool AllowCustomReply;
@@ -66,6 +137,8 @@ namespace Npcify.Sdk.Models
         public bool SightEnabled;
         /// <summary>The vision provider of sight ("gemini" or "openai"), or null.</summary>
         public string SightProvider;
+        /// <summary>The owner enabled SDK Player Memory on the character.</summary>
+        public bool SdkMemoryEnabled;
     }
 
     [Serializable]
@@ -156,6 +229,12 @@ namespace Npcify.Sdk.Models
         public List<Npcify.Sdk.Motion.StagingMotionPrompt> Motions = new List<Npcify.Sdk.Motion.StagingMotionPrompt>();
         /// <summary>The stored live motion frames of a completed staging, or null (NPCP 1.1).</summary>
         public Npcify.Sdk.Motion.StagingMotionTrack Motion;
+        /// <summary>Variant active at the start of the staging (NPCP 1.2; null/empty defaults to "default").</summary>
+        public string InitialVariant;
+        /// <summary>Variant active at the end of the staging (NPCP 1.2; null/empty defaults to "default").</summary>
+        public string ActiveVariant;
+        /// <summary>Recorded agent tool calls and results on the staging clock (NPCP 1.2).</summary>
+        public List<NpcifyStagingToolCall> ToolCalls = new List<NpcifyStagingToolCall>();
     }
 
     [Serializable]
@@ -193,6 +272,9 @@ namespace Npcify.Sdk.Models
         public string Text = string.Empty;
         public List<StagingReplyOption> Options = new List<StagingReplyOption>();
         public string CreatedAt = "1970-01-01T00:00:00.000Z";
+        public string InitialVariant;
+        public string ActiveVariant;
+        public List<NpcifyStagingToolCall> ToolCalls = new List<NpcifyStagingToolCall>();
     }
 
     [Serializable]

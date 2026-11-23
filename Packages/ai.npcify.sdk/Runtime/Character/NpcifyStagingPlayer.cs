@@ -11,6 +11,7 @@ namespace Npcify.Sdk.Character
         private readonly NpcifyVisemePlayer _visemePlayer;
         private readonly NpcifyPlayedClips _playedExpressions = new NpcifyPlayedClips();
         private readonly NpcifyPlayedClips _playedAnimations = new NpcifyPlayedClips();
+        private readonly HashSet<string> _appliedToolCallIds = new HashSet<string>(StringComparer.Ordinal);
         private readonly StringBuilder _revealedBuilder = new StringBuilder();
         // The block that plays had no character timing when it started: all of its text shows.
         private bool _wholeTextRevealed;
@@ -40,6 +41,8 @@ namespace Npcify.Sdk.Character
         public event Action<string, StagingCharacterCue> OnCharacterRevealed;
         public event Action<StagingExpressionClip> OnExpressionClipTriggered;
         public event Action<StagingAnimationClip> OnAnimationClipTriggered;
+        public event Action<NpcifyStagingToolCall> OnToolCallTriggered;
+        public event Action<string, NpcifyStagingToolCall> OnVariantCue;
         public event Action<StagingResultPayload> OnStagingCompleted;
 
         public bool IsPlaying => _isPlaying;
@@ -183,6 +186,7 @@ namespace Npcify.Sdk.Character
             _waitingBlockIndex = -1;
             _playedExpressions.Clear();
             _playedAnimations.Clear();
+            _appliedToolCallIds.Clear();
             _revealedBuilder.Clear();
             _wholeTextRevealed = false;
             _timelineElapsedSeconds = 0.0;
@@ -190,11 +194,20 @@ namespace Npcify.Sdk.Character
             _currentBlockIndex = -1;
             _nextCharCueIndex = 0;
 
+            var initialVariant = string.IsNullOrWhiteSpace(staging.Timeline?.InitialVariant)
+                ? NpcifyVariantSummary.DefaultKey
+                : staging.Timeline.InitialVariant.Trim();
+            OnVariantCue?.Invoke(initialVariant, null);
+
             var dialogue = staging.Timeline?.Dialogue;
             if (dialogueComplete && (dialogue == null || dialogue.Count == 0))
             {
                 _isPlaying = false;
-                EvaluateGlobalTracks(0.0);
+                EvaluateGlobalTracks(staging.Timeline?.Duration ?? 0.0);
+                if (!string.IsNullOrWhiteSpace(staging.Timeline?.ActiveVariant))
+                {
+                    OnVariantCue?.Invoke(staging.Timeline.ActiveVariant.Trim(), null);
+                }
                 OnStagingCompleted?.Invoke(staging);
                 return;
             }
@@ -225,6 +238,7 @@ namespace Npcify.Sdk.Character
             }
 
             _staging = updatedStaging;
+            EvaluateToolCalls(_timelineElapsedSeconds);
         }
 
         public void Stop()
@@ -422,6 +436,7 @@ namespace Npcify.Sdk.Character
             {
                 return;
             }
+            EvaluateToolCalls(timelineSeconds);
             // Revisions of a streamed staging can move clips that played.
             var streamed = _isBlockReady != null;
 
@@ -540,6 +555,49 @@ namespace Npcify.Sdk.Character
             return Math.Max(0.05, maxEnd);
         }
 
+        private void EvaluateToolCalls(double timelineSeconds)
+        {
+            var toolCalls = _staging?.Timeline?.ToolCalls;
+            if (toolCalls == null || toolCalls.Count == 0)
+            {
+                return;
+            }
+
+            List<NpcifyStagingToolCall> ordered;
+            if (toolCalls.Count > 1)
+            {
+                ordered = new List<NpcifyStagingToolCall>(toolCalls);
+                ordered.Sort((a, b) => (a?.Timestamp ?? 0.0).CompareTo(b?.Timestamp ?? 0.0));
+            }
+            else
+            {
+                ordered = toolCalls;
+            }
+
+            for (var i = 0; i < ordered.Count; i++)
+            {
+                var call = ordered[i];
+                if (call == null || string.IsNullOrEmpty(call.Id) || _appliedToolCallIds.Contains(call.Id))
+                {
+                    continue;
+                }
+                if (timelineSeconds + 1e-6 < call.Timestamp)
+                {
+                    continue;
+                }
+
+                _appliedToolCallIds.Add(call.Id);
+                OnToolCallTriggered?.Invoke(call);
+                if (string.Equals(call.Name, "switch_variant", StringComparison.Ordinal) &&
+                    call.Result != null &&
+                    call.Result.Ok &&
+                    !string.IsNullOrWhiteSpace(call.Result.ActiveVariant))
+                {
+                    OnVariantCue?.Invoke(call.Result.ActiveVariant.Trim(), call);
+                }
+            }
+        }
+
         private void CompletePlayback()
         {
             _isPlaying = false;
@@ -548,6 +606,11 @@ namespace Npcify.Sdk.Character
             var completedStaging = _staging;
             if (completedStaging != null)
             {
+                EvaluateToolCalls(Math.Max(_timelineElapsedSeconds, completedStaging.Timeline?.Duration ?? 0.0));
+                if (!string.IsNullOrWhiteSpace(completedStaging.Timeline?.ActiveVariant))
+                {
+                    OnVariantCue?.Invoke(completedStaging.Timeline.ActiveVariant.Trim(), null);
+                }
                 OnStagingCompleted?.Invoke(completedStaging);
             }
         }

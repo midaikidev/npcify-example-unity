@@ -42,6 +42,8 @@ namespace Npcify.Sdk.Character
                 ["happy"] = "happy",
                 ["joy"] = "happy",
                 ["smile"] = "happy",
+                ["mouthsmileleft"] = "happy",
+                ["mouthsmileright"] = "happy",
                 ["angry"] = "angry",
                 ["anger"] = "angry",
                 ["sad"] = "sad",
@@ -65,6 +67,7 @@ namespace Npcify.Sdk.Character
                 ["u"] = "ou",
                 ["fcl_mth_u"] = "ou",
                 ["vrc.v_ou"] = "ou",
+                ["mouthpucker"] = "ou",
                 ["ee"] = "ee",
                 ["e"] = "ee",
                 ["fcl_mth_e"] = "ee",
@@ -73,6 +76,7 @@ namespace Npcify.Sdk.Character
                 ["o"] = "oh",
                 ["fcl_mth_o"] = "oh",
                 ["vrc.v_oh"] = "oh",
+                ["mouthfunnel"] = "oh",
                 ["blink"] = "blink",
                 ["fcl_eye_close"] = "blink",
                 ["blinkleft"] = "blinkLeft",
@@ -85,12 +89,20 @@ namespace Npcify.Sdk.Character
                 ["eyeblinkright"] = "blinkRight",
                 ["lookup"] = "lookUp",
                 ["look_up"] = "lookUp",
+                ["eyelookupleft"] = "lookUp",
+                ["eyelookupright"] = "lookUp",
                 ["lookdown"] = "lookDown",
                 ["look_down"] = "lookDown",
+                ["eyelookdownleft"] = "lookDown",
+                ["eyelookdownright"] = "lookDown",
                 ["lookleft"] = "lookLeft",
                 ["look_left"] = "lookLeft",
+                ["eyelookinright"] = "lookLeft",
+                ["eyelookoutleft"] = "lookLeft",
                 ["lookright"] = "lookRight",
                 ["look_right"] = "lookRight",
+                ["eyelookinleft"] = "lookRight",
+                ["eyelookoutright"] = "lookRight",
             };
 
         private static readonly HashSet<string> VisemeKeys = new HashSet<string>(StringComparer.Ordinal)
@@ -116,16 +128,26 @@ namespace Npcify.Sdk.Character
             new Dictionary<NpcifyExpressionLayer, Dictionary<string, float>>();
         private readonly Dictionary<string, float> _smoothedWeights =
             new Dictionary<string, float>(StringComparer.Ordinal);
+        // The smoothed weights with the idle blink: the weights that the face shows.
+        private readonly Dictionary<string, float> _appliedWeights =
+            new Dictionary<string, float>(StringComparer.Ordinal);
+        // The applied weights in the order of CanonicalExpressions.
+        private readonly float[] _appliedList = new float[ExpressionCount];
         private readonly List<ActiveCue> _activeCues = new List<ActiveCue>();
 
-        private float _blinkTimer;
-        private float _nextBlinkInterval = 3.6f;
-        private float _blinkDuration = 0.14f;
-        private bool _isBlinking;
-        private uint _rngState = 0x6D2B79F5u;
+        private readonly NpcifyIdleBlinks _idleBlinks;
+        private double _clock;
+        private float _idleBlink;
 
         public NpcifyFacialMixer()
+            : this(null)
         {
+        }
+
+        /// <summary>A mixer with the blink schedule <paramref name="idleBlinks"/> (tests: a seeded one).</summary>
+        public NpcifyFacialMixer(NpcifyIdleBlinks idleBlinks)
+        {
+            _idleBlinks = idleBlinks ?? new NpcifyIdleBlinks();
             foreach (NpcifyExpressionLayer layer in Enum.GetValues(typeof(NpcifyExpressionLayer)))
             {
                 _layers[layer] = new Dictionary<string, float>(StringComparer.Ordinal);
@@ -133,14 +155,29 @@ namespace Npcify.Sdk.Character
             for (var i = 0; i < CanonicalExpressions.Length; i++)
             {
                 _smoothedWeights[CanonicalExpressions[i]] = 0f;
+                _appliedWeights[CanonicalExpressions[i]] = 0f;
             }
         }
 
+        /// <summary>
+        /// The face blinks by itself, as people do (<see cref="NpcifyIdleBlinks"/>): at irregular
+        /// intervals, more often while it speaks, and with a large gaze shift, a turn of the head
+        /// (<see cref="TrackHead"/>) or a new movement (<see cref="RequestBlink"/>).
+        /// </summary>
         public bool AutoBlinkEnabled { get; set; } = true;
+
+        /// <summary>The blink schedule of this face.</summary>
+        public NpcifyIdleBlinks IdleBlinks => _idleBlinks;
+
+        /// <summary>The clock of the face: the sum of the time steps of <see cref="Update"/>.</summary>
+        public double ClockSeconds => _clock;
+
+        /// <summary>The weight of the idle blink at the last <see cref="Update"/>, 0 to 1.</summary>
+        public float IdleBlinkWeight => _idleBlink;
 
         public float SmoothingRate { get; set; } = 18f;
 
-        public IReadOnlyDictionary<string, float> Weights => _smoothedWeights;
+        public IReadOnlyDictionary<string, float> Weights => _appliedWeights;
 
         public float MouthOpenness
         {
@@ -170,10 +207,89 @@ namespace Npcify.Sdk.Character
             return trimmed;
         }
 
+        /// <summary>The number of expressions of a face: the VRM presets that the mixer plays.</summary>
+        public const int ExpressionCount = 18;
+
+        /// <summary>
+        /// The index of an expression name or of one of its alias names in the list of the
+        /// expressions (neutral, happy, angry, sad, relaxed, surprised, aa, ih, ou, ee, oh, blink,
+        /// blinkLeft, blinkRight, lookUp, lookDown, lookLeft, lookRight); -1 for a name that is
+        /// not an expression.
+        /// </summary>
+        public static int ExpressionIndex(string name)
+        {
+            if (string.IsNullOrWhiteSpace(name))
+            {
+                return -1;
+            }
+            return Array.IndexOf(CanonicalExpressions, NormalizeExpressionName(name));
+        }
+
+        // The VRM 0 preset names with the index of their VRM 1 preset.
+        private static readonly Dictionary<string, int> Vrm0Presets =
+            new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["joy"] = 1, ["sorrow"] = 3, ["fun"] = 4,
+                ["a"] = 6, ["i"] = 7, ["u"] = 8, ["e"] = 9, ["o"] = 10,
+                ["blink_l"] = 12, ["blink_r"] = 13,
+            };
+
+        /// <summary>
+        /// The index of a preset expression of a VRM file in that list: a VRM 1 preset name
+        /// ("happy", "blinkLeft") or a VRM 0 preset name ("joy", "blink_l"), without regard to
+        /// case. -1 for every other name: a custom expression of a file is not a preset, also
+        /// when its name is an alias name of a blend shape ("MouthSmileLeft").
+        /// </summary>
+        public static int PresetIndex(string name)
+        {
+            if (string.IsNullOrWhiteSpace(name))
+            {
+                return -1;
+            }
+            var trimmed = name.Trim();
+            for (var index = 0; index < CanonicalExpressions.Length; index++)
+            {
+                if (string.Equals(trimmed, CanonicalExpressions[index], StringComparison.OrdinalIgnoreCase))
+                {
+                    return index;
+                }
+            }
+            return Vrm0Presets.TryGetValue(trimmed, out var preset) ? preset : -1;
+        }
+
+        /// <summary>The weight of the expression at <paramref name="index"/> of that list: GetWeight without a name search.</summary>
+        public float GetWeightAt(int index)
+        {
+            return index >= 0 && index < ExpressionCount ? _appliedList[index] : 0f;
+        }
+
         public float GetWeight(string expressionName)
         {
             var canonical = NormalizeExpressionName(expressionName);
-            return _smoothedWeights.TryGetValue(canonical, out var value) ? value : 0f;
+            return _appliedWeights.TryGetValue(canonical, out var value) ? value : 0f;
+        }
+
+        /// <summary>
+        /// Asks for a blink because the character starts a movement (a new animation, a turn):
+        /// people blink at such moments. <paramref name="chance"/> is the part of such movements
+        /// that bring a blink. Nothing happens with auto blink off, while a blink plays, within
+        /// 0.6 s after one, or while a cue drives a blink expression. Returns whether a blink starts.
+        /// </summary>
+        public bool RequestBlink(float chance = 1f)
+        {
+            return AutoBlinkEnabled && _idleBlinks.RequestBlink(_clock, chance);
+        }
+
+        /// <summary>
+        /// Takes the rotation of the head in the world (the four numbers of a quaternion). Call it
+        /// in each frame: a fast and large turn of the head brings a blink.
+        /// </summary>
+        public void TrackHead(float x, float y, float z, float w)
+        {
+            if (AutoBlinkEnabled)
+            {
+                _idleBlinks.TrackHead(_clock, x, y, z, w);
+            }
         }
 
         public void SetLayerWeight(NpcifyExpressionLayer layer, string expressionName, float weight)
@@ -278,6 +394,10 @@ namespace Npcify.Sdk.Character
             layer["lookLeft"] = Clamp01(-yawDegrees / safeMaxYaw);
             layer["lookUp"] = Clamp01(pitchDegrees / safeMaxPitch);
             layer["lookDown"] = Clamp01(-pitchDegrees / safeMaxPitch);
+            // A fast and large shift of the eyes brings a blink.
+            WatchGaze(
+                Math.Max(-safeMaxYaw, Math.Min(safeMaxYaw, yawDegrees)),
+                Math.Max(-safeMaxPitch, Math.Min(safeMaxPitch, pitchDegrees)));
         }
 
         public void SetGazeDirection(
@@ -306,6 +426,7 @@ namespace Npcify.Sdk.Character
         public void ClearGaze()
         {
             _layers[NpcifyExpressionLayer.Gaze].Clear();
+            WatchGaze(0f, 0f);
         }
 
         public void Reset()
@@ -319,18 +440,21 @@ namespace Npcify.Sdk.Character
             for (var i = 0; i < keys.Count; i++)
             {
                 _smoothedWeights[keys[i]] = 0f;
+                _appliedWeights[keys[i]] = 0f;
             }
-            _blinkTimer = 0f;
-            _isBlinking = false;
+            Array.Clear(_appliedList, 0, _appliedList.Length);
+            _idleBlinks.Reset();
+            _idleBlink = 0f;
         }
 
         public void Update(float deltaTimeSeconds)
         {
             var dt = Math.Max(0f, deltaTimeSeconds);
-            UpdateAutoBlink(dt);
+            _clock += dt;
             UpdateActiveCues(dt);
 
             var targets = ComputeCombinedTargets();
+            UpdateIdleBlink(targets);
             var alpha = dt <= 0f ? 1f : (float)(1.0 - Math.Exp(-SmoothingRate * dt));
 
             foreach (var key in CanonicalExpressions)
@@ -338,7 +462,18 @@ namespace Npcify.Sdk.Character
                 var target = targets.TryGetValue(key, out var t) ? t : 0f;
                 var current = _smoothedWeights.TryGetValue(key, out var c) ? c : 0f;
                 var next = current + (target - current) * alpha;
-                _smoothedWeights[key] = next < 0.0005f && target == 0f ? 0f : Clamp01(next);
+                // A weight within 0.001 of its target takes the target (the rule of the Web SDK).
+                _smoothedWeights[key] = Math.Abs(next - target) < 0.001f ? Clamp01(target) : Clamp01(next);
+                _appliedWeights[key] = _smoothedWeights[key];
+            }
+            // The idle blink has its own curve: it is not smoothed.
+            if (_idleBlink > _appliedWeights["blink"])
+            {
+                _appliedWeights["blink"] = _idleBlink;
+            }
+            for (var index = 0; index < ExpressionCount; index++)
+            {
+                _appliedList[index] = _appliedWeights[CanonicalExpressions[index]];
             }
         }
 
@@ -352,14 +487,14 @@ namespace Npcify.Sdk.Character
             if (AliasToCanonical.TryGetValue(blendShapeName.Trim(), out var canonical))
             {
                 if ((canonical == "blinkLeft" || canonical == "blinkRight") &&
-                    _smoothedWeights.TryGetValue("blink", out var fullBlink) &&
+                    _appliedWeights.TryGetValue("blink", out var fullBlink) &&
                     fullBlink > 0f)
                 {
-                    var side = _smoothedWeights.TryGetValue(canonical, out var s) ? s : 0f;
+                    var side = _appliedWeights.TryGetValue(canonical, out var s) ? s : 0f;
                     return Clamp01(Math.Max(fullBlink, side));
                 }
 
-                return _smoothedWeights.TryGetValue(canonical, out var w) ? w : 0f;
+                return _appliedWeights.TryGetValue(canonical, out var w) ? w : 0f;
             }
 
             return 0f;
@@ -384,30 +519,6 @@ namespace Npcify.Sdk.Character
                 var envelope = EvaluateCueEnvelope(cue);
                 var existing = result.TryGetValue(cue.Expression, out var cur) ? cur : 0f;
                 result[cue.Expression] = Clamp01(Math.Max(existing, cue.TargetWeight * envelope));
-            }
-
-            // Attenuate strong emotion mouth shapes slightly during active viseme articulation
-            var visemePeak = 0f;
-            foreach (var viseme in VisemeKeys)
-            {
-                if (result.TryGetValue(viseme, out var v) && v > visemePeak)
-                {
-                    visemePeak = v;
-                }
-            }
-
-            if (visemePeak > 0.1f)
-            {
-                var emotionScale = 1f - 0.35f * visemePeak;
-                string[] emotionKeys = { "happy", "angry", "sad", "relaxed", "surprised" };
-                for (var i = 0; i < emotionKeys.Length; i++)
-                {
-                    var key = emotionKeys[i];
-                    if (result.TryGetValue(key, out var val))
-                    {
-                        result[key] = Clamp01(val * emotionScale);
-                    }
-                }
             }
 
             return result;
@@ -439,45 +550,28 @@ namespace Npcify.Sdk.Character
             return Math.Min(fadeInFactor, fadeOutFactor);
         }
 
-        private void UpdateAutoBlink(float dt)
+        // The idle blink of this update. A blink expression that a cue, the emotion or a layer
+        // drives holds it: a blink that is due is skipped, and a blink that plays ends.
+        private void UpdateIdleBlink(Dictionary<string, float> targets)
         {
-            if (!AutoBlinkEnabled)
-            {
-                return;
-            }
-
-            _blinkTimer += dt;
-            if (!_isBlinking)
-            {
-                if (_blinkTimer >= _nextBlinkInterval)
-                {
-                    _isBlinking = true;
-                    _blinkTimer = 0f;
-                }
-                return;
-            }
-
-            var progress = _blinkTimer / _blinkDuration;
-            if (progress >= 1f)
-            {
-                _isBlinking = false;
-                _blinkTimer = 0f;
-                _layers[NpcifyExpressionLayer.Blink]["blink"] = 0f;
-                _nextBlinkInterval = 2.4f + NextRandom01() * 3.2f;
-            }
-            else
-            {
-                var wave = (float)Math.Sin(progress * Math.PI);
-                _layers[NpcifyExpressionLayer.Blink]["blink"] = Clamp01(wave);
-            }
+            var held = !AutoBlinkEnabled || Drives(targets, "blink") || Drives(targets, "blinkLeft") ||
+                Drives(targets, "blinkRight");
+            var speaking = _layers[NpcifyExpressionLayer.Viseme].Count > 0;
+            var weight = _idleBlinks.Sample(_clock, held, speaking);
+            _idleBlink = held ? 0f : Clamp01((float)weight);
         }
 
-        private float NextRandom01()
+        private static bool Drives(Dictionary<string, float> targets, string key)
         {
-            _rngState ^= _rngState << 13;
-            _rngState ^= _rngState >> 17;
-            _rngState ^= _rngState << 5;
-            return (_rngState & 0x00FFFFFFu) / (float)0x01000000u;
+            return targets.TryGetValue(key, out var value) && value > 0f;
+        }
+
+        private void WatchGaze(float yawDegrees, float pitchDegrees)
+        {
+            if (AutoBlinkEnabled)
+            {
+                _idleBlinks.WatchGaze(_clock, yawDegrees, pitchDegrees);
+            }
         }
 
         private static float Clamp01(float value)
